@@ -1,0 +1,8 @@
+**/*.pyc
+**/__pycache__/
+.venv/
+database/
+
+# Database config files (never commit credentials!)
+**/db.ini
+*.ini

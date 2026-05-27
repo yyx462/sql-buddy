@@ -1,0 +1,17 @@
+# Database Configuration Template
+# Copy this file to db.ini and fill in your actual credentials
+# IMPORTANT: Never commit db.ini to version control!
+
+[ck]
+host = localhost
+port = 9000
+user = your_clickhouse_user
+password = your_clickhouse_password
+database = default
+
+[mysql]
+host = localhost
+port = 3306
+user = your_mysql_user
+password = your_mysql_password
+database = myapp
