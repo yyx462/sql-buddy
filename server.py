@@ -5,6 +5,7 @@ import os
 import sys
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.resources import FunctionResource
 
 # Ensure db_conn_locked is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +21,17 @@ from db_query import (
     table_schema_query,
 )
 
+DEFAULT_DB = os.environ.get("SQL_BUDDY_DEFAULT_DB", "ck")
+
+# Parse project-specific table resources: {"ck": ["orders", "users"], "mysql": ["products"]}
+_RESOURCES_CONFIG: dict = {}
+_raw = os.environ.get("SQL_BUDDY_RESOURCES")
+if _raw:
+    try:
+        _RESOURCES_CONFIG = json.loads(_raw)
+    except json.JSONDecodeError:
+        pass
+
 init_dirs()
 
 mcp = FastMCP("sql-buddy", instructions=(
@@ -32,13 +44,38 @@ mcp = FastMCP("sql-buddy", instructions=(
     "Use `list_databases` to discover available db_name options. "
     "Use `list_tables` to list tables in a database, with optional LIKE filter. "
     "Use `explain` to run EXPLAIN on a query and get cost estimates. "
+    "Resources expose table schemas for configured tables. Use list_resources to discover them. "
     "LIMIT is auto-added (default 10, max 100) for SELECT and WITH queries. "
     "All operations are read-only."
 ))
 
 
+# --- Resources (from SQL_BUDDY_RESOURCES env var) ---
+
+if _RESOURCES_CONFIG:
+    @mcp.resource("resource://tables", name="configured-tables",
+                   description="List of all configured table resources")
+    def list_configured_tables() -> str:
+        return json.dumps(_RESOURCES_CONFIG, indent=2)
+
+    for _db_name, _table_list in _RESOURCES_CONFIG.items():
+        if not isinstance(_table_list, list):
+            continue
+        for _tbl in _table_list:
+            _uri = f"resource://{_db_name}/{_tbl}/schema"
+            mcp.add_resource(FunctionResource.from_function(
+                fn=lambda _d=_db_name, _t=_tbl: json.dumps(
+                    table_schema_query(_t, _d), indent=2, default=str
+                ),
+                uri=_uri,
+                name=f"{_db_name}.{_tbl}",
+                description=f"Schema for {_db_name}.{_tbl} (CREATE TABLE + parsed columns)",
+                mime_type="application/json",
+            ))
+
+
 @mcp.tool()
-def query(sql: str, db_name: str = "ck") -> str:
+def query(sql: str, db_name: str = DEFAULT_DB) -> str:
     """Execute a read-only SQL query. Returns JSON with columns and rows.
     LIMIT is auto-added if missing (default 10, max 100)."""
     try:
@@ -51,7 +88,7 @@ def query(sql: str, db_name: str = "ck") -> str:
 
 
 @mcp.tool()
-def get_schema(table_name: str, db_name: str = "ck", force_refresh: bool = False) -> str:
+def get_schema(table_name: str, db_name: str = DEFAULT_DB, force_refresh: bool = False) -> str:
     """Get CREATE TABLE statement for a table. Returns JSON with schema, parsed columns, engine, partition, order_by. Cached for 3 days."""
     try:
         result = table_schema_query(table_name, db_name, force_refresh)
@@ -61,7 +98,7 @@ def get_schema(table_name: str, db_name: str = "ck", force_refresh: bool = False
 
 
 @mcp.tool()
-def get_info(table_name: str, db_name: str = "ck", force_refresh: bool = False) -> str:
+def get_info(table_name: str, db_name: str = DEFAULT_DB, force_refresh: bool = False) -> str:
     """Get table metadata: row count, indexes, partitions. Cached for 3 days."""
     try:
         result = table_info_query(table_name, db_name, force_refresh)
@@ -71,7 +108,7 @@ def get_info(table_name: str, db_name: str = "ck", force_refresh: bool = False) 
 
 
 @mcp.tool()
-def get_history(db_name: str = "ck", table_name: str | None = None) -> str:
+def get_history(db_name: str = DEFAULT_DB, table_name: str | None = None) -> str:
     """Get query execution history, optionally filtered by table."""
     try:
         result = get_history_queries(db_name, table_name)
@@ -90,7 +127,7 @@ def list_databases_tool() -> str:
 
 
 @mcp.tool()
-def list_tables_tool(db_name: str = "ck", database: str | None = None, like: str | None = None) -> str:
+def list_tables_tool(db_name: str = DEFAULT_DB, database: str | None = None, like: str | None = None) -> str:
     """List tables in a database. Optionally filter with LIKE pattern (e.g. 'test_%')."""
     try:
         return list_tables(db_name, database, like)
@@ -99,7 +136,7 @@ def list_tables_tool(db_name: str = "ck", database: str | None = None, like: str
 
 
 @mcp.tool()
-def explain(sql: str, db_name: str = "ck") -> str:
+def explain(sql: str, db_name: str = DEFAULT_DB) -> str:
     """Run EXPLAIN on a query and return execution plan with cost estimates. Use to analyze query performance."""
     try:
         return explain_query(sql, db_name)
