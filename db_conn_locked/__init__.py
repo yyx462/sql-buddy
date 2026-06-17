@@ -192,6 +192,24 @@ class LockedClickHouseClient:
         return self._wrapped.connected
 
 
+def connection_type(cfg, section: str) -> str:
+    """Resolve a connection's DBMS type.
+
+    Reads an explicit `type = clickhouse|mysql` from the section; falls back to
+    inferring from the section-name prefix so older configs keep working.
+    """
+    explicit = cfg.get(section, 'type', fallback=None)
+    if explicit:
+        return explicit.strip().lower()
+    if section.startswith("ck"):
+        return 'clickhouse'
+    if section.startswith("db") or section.startswith("mysql"):
+        return 'mysql'
+    raise ValueError(
+        f"Unknown connection type for [{section}]; set `type = clickhouse|mysql` in db.ini"
+    )
+
+
 class DBManager:
     """Unlocked DBManager - returns raw connections."""
 
@@ -220,18 +238,20 @@ class DBManager:
         if name in self._cache:
             return self._cache[name]
 
-        if section.startswith("ck"):
+        ctype = connection_type(self._cfg, section)
+        if ctype == 'clickhouse':
             client = self._create_clickhouse_client(section)
-        elif section.startswith("db") or section.startswith("mysql"):
+        elif ctype in ('mysql', 'mariadb'):
             client = self._create_mysql_client(section)
         else:
-            raise ValueError(f"Unknown client type: {section}")
+            raise ValueError(f"Unsupported connection type '{ctype}' for [{section}]")
 
         self._cache[name] = client
         return client
 
     def _create_clickhouse_client(self, section: str) -> Client:
         conn_config = dict(self._cfg[section])
+        conn_config.pop('type', None)  # `type` is a meta key, not a driver param
         if self._wsl_host_override and is_wsl():
             windows_ip = get_windows_host_ip()
             if windows_ip:
@@ -241,6 +261,7 @@ class DBManager:
 
     def _create_mysql_client(self, section: str) -> MySQLConnectionWrapper:
         conn_config = dict(self._cfg[section])
+        conn_config.pop('type', None)  # `type` is a meta key, not a driver param
         if self._wsl_host_override and is_wsl():
             windows_ip = get_windows_host_ip()
             if windows_ip:
@@ -289,8 +310,8 @@ class DBManager:
         yield SessionClient()
 
     @contextmanager
-    def transaction_scope(self, db_name: str):
-        conn = getattr(self, db_name)
+    def transaction_scope(self, connection: str):
+        conn = getattr(self, connection)
         cursor = conn.cursor()
         cursor.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED")
         cursor.execute("SET SESSION innodb_lock_wait_timeout = 600")
@@ -313,4 +334,4 @@ class LockedDBManager(DBManager):
         return LockedMySQLConnectionWrapper(super()._create_mysql_client(section))
 
 
-__all__ = ['DBManager', 'LockedDBManager', 'get_remote_db', 'is_wsl', 'is_container']
+__all__ = ['DBManager', 'LockedDBManager', 'connection_type', 'get_remote_db', 'is_wsl', 'is_container']

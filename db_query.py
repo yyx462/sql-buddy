@@ -17,14 +17,14 @@ logging.basicConfig(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db_conn_locked import LockedDBManager as DBManager
+from db_conn_locked import LockedDBManager as DBManager, connection_type
 
 # Cache directories
 ROOT_DIR = os.environ.get(
-    'DB_QUERY_CACHE_DIR',
+    'DB_QUERY_HISTORY_DIR',
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database')
 )
-QUERY_CACHE_DIR = os.path.join(ROOT_DIR, 'query_cache')
+QUERY_HISTORY_DIR = os.path.join(ROOT_DIR, 'query_history')
 DB_INFO_CACHE_DIR = os.path.join(ROOT_DIR, 'db_info_cache')
 DB_SCHEMA_CACHE_DIR = os.path.join(ROOT_DIR, 'db_schema_cache')
 
@@ -35,17 +35,17 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_conn_
 
 
 def init_dirs():
-    for d in [QUERY_CACHE_DIR, DB_INFO_CACHE_DIR, DB_SCHEMA_CACHE_DIR]:
+    for d in [QUERY_HISTORY_DIR, DB_INFO_CACHE_DIR, DB_SCHEMA_CACHE_DIR]:
         os.makedirs(d, exist_ok=True)
 
 
-def _get_cache_file_path(cache_type: str, db_name: str) -> str:
+def _get_cache_file_path(cache_type: str, connection: str) -> str:
     if cache_type == 'query':
-        return os.path.join(QUERY_CACHE_DIR, f'{db_name}_query_history.json')
+        return os.path.join(QUERY_HISTORY_DIR, f'{connection}_query_history.json')
     elif cache_type == 'info':
-        return os.path.join(DB_INFO_CACHE_DIR, f'{db_name}_table_info.json')
+        return os.path.join(DB_INFO_CACHE_DIR, f'{connection}_table_info.json')
     elif cache_type == 'schema':
-        return os.path.join(DB_SCHEMA_CACHE_DIR, f'{db_name}_schema.json')
+        return os.path.join(DB_SCHEMA_CACHE_DIR, f'{connection}_schema.json')
     raise ValueError(f"Unknown cache type: {cache_type}")
 
 
@@ -220,8 +220,8 @@ def _extract_time_columns(schema: str) -> list:
     return time_cols
 
 
-def table_schema_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool = False) -> dict:
-    cache_file = _get_cache_file_path('schema', db_name)
+def table_schema_query(tbl_name: str, connection: str = 'ck', force_refresh: bool = False) -> dict:
+    cache_file = _get_cache_file_path('schema', connection)
     cache = _load_json_safe(cache_file)
 
     if not force_refresh and tbl_name in cache:
@@ -231,7 +231,7 @@ def table_schema_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool =
 
     try:
         db = DBManager()
-        client = getattr(db, db_name)
+        client = getattr(db, connection)
 
         if hasattr(client, 'query_dataframe'):
             result = client.query_dataframe(f"SHOW CREATE TABLE {tbl_name}")
@@ -266,8 +266,8 @@ def table_schema_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool =
 
 # --- Table Info ---
 
-def table_info_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool = False) -> dict:
-    cache_file = _get_cache_file_path('info', db_name)
+def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool = False) -> dict:
+    cache_file = _get_cache_file_path('info', connection)
     cache = _load_json_safe(cache_file)
 
     if not force_refresh and tbl_name in cache:
@@ -277,7 +277,7 @@ def table_info_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool = F
 
     try:
         db = DBManager()
-        client = getattr(db, db_name)
+        client = getattr(db, connection)
         info = {'table_name': tbl_name, 'cached_at': datetime.now().isoformat()}
 
         if hasattr(client, 'query_dataframe'):
@@ -316,8 +316,8 @@ def table_info_query(tbl_name: str, db_name: str = 'ck', force_refresh: bool = F
 
 # --- Query Optimization ---
 
-def query_optimize(tbl_name: str, query: str, db_name: str = 'ck') -> str:
-    schema_info = table_schema_query(tbl_name, db_name)
+def query_optimize(tbl_name: str, query: str, connection: str = 'ck') -> str:
+    schema_info = table_schema_query(tbl_name, connection)
     optimized = query
 
     time_cols = schema_info.get('time_columns', [])
@@ -332,11 +332,11 @@ def query_optimize(tbl_name: str, query: str, db_name: str = 'ck') -> str:
 
 # --- History ---
 
-def _load_query_history(db_name: str) -> dict:
-    return _load_json_safe(_get_cache_file_path('query', db_name))
+def _load_query_history(connection: str) -> dict:
+    return _load_json_safe(_get_cache_file_path('query', connection))
 
 
-def _save_query_history(db_name: str, history: dict):
+def _save_query_history(connection: str, history: dict):
     if len(history) > MAX_HISTORY_ENTRIES:
         sorted_items = sorted(
             history.items(),
@@ -344,11 +344,11 @@ def _save_query_history(db_name: str, history: dict):
             reverse=True
         )
         history = dict(sorted_items[:MAX_HISTORY_ENTRIES])
-    _save_json_safe(_get_cache_file_path('query', db_name), history)
+    _save_json_safe(_get_cache_file_path('query', connection), history)
 
 
-def get_history_queries(db_name: str = 'ck', tbl_name: Optional[str] = None) -> dict:
-    history = _load_query_history(db_name)
+def get_history_queries(connection: str = 'ck', tbl_name: Optional[str] = None) -> dict:
+    history = _load_query_history(connection)
     if tbl_name:
         return {
             h: e for h, e in history.items()
@@ -359,25 +359,25 @@ def get_history_queries(db_name: str = 'ck', tbl_name: Optional[str] = None) -> 
 
 # --- Database Discovery ---
 
-def list_databases() -> str:
-    """List available db_name options from config. Returns JSON."""
+def list_connections() -> str:
+    """List available connection options from config. Returns JSON."""
     import configparser
     cfg = configparser.RawConfigParser()
     cfg.read(CONFIG_FILE)
-    databases = []
+    connections = []
     for section in cfg.sections():
-        databases.append({
+        connections.append({
             'name': section,
-            'type': 'clickhouse' if section.startswith('ck') else 'mysql',
+            'type': connection_type(cfg, section),
         })
-    return json.dumps({"databases": databases, "count": len(databases)}, default=str)
+    return json.dumps({"connections": connections, "count": len(connections)}, default=str)
 
 
-def list_tables(db_name: str = 'ck', database: str | None = None, like: str | None = None) -> str:
+def list_tables(connection: str = 'ck', database: str | None = None, like: str | None = None) -> str:
     """List tables in a database. Returns JSON with table names."""
     try:
         db = DBManager()
-        client = getattr(db, db_name)
+        client = getattr(db, connection)
 
         if hasattr(client, 'query_dataframe'):
             # MySQL
@@ -409,7 +409,7 @@ def list_tables(db_name: str = 'ck', database: str | None = None, like: str | No
 
 # --- Explain ---
 
-def explain_query(sql: str, db_name: str = 'ck') -> str:
+def explain_query(sql: str, connection: str = 'ck') -> str:
     """Run EXPLAIN on a query, return plan with cost estimates. Returns JSON."""
     if not _is_query_allowed(sql):
         raise AssertionError("Query must be a read-only operation.")
@@ -418,7 +418,7 @@ def explain_query(sql: str, db_name: str = 'ck') -> str:
 
     try:
         db = DBManager()
-        client = getattr(db, db_name)
+        client = getattr(db, connection)
 
         if hasattr(client, 'query_dataframe'):
             result = client.query_dataframe(explain_sql)
@@ -465,7 +465,7 @@ def _sanitize_row(row_dict: dict) -> dict:
 
 # --- Query Execution ---
 
-def execute_limit_query(sql: str, db_name: str = 'ck') -> str:
+def execute_limit_query(sql: str, connection: str = 'ck') -> str:
     """Execute read-only query. Auto-adds LIMIT (default 10, max 100). Returns JSON with metadata."""
     sql_trimmed = sql.strip().upper()
 
@@ -484,10 +484,10 @@ def execute_limit_query(sql: str, db_name: str = 'ck') -> str:
         if match and int(match.group(1)) > 100:
             sql = re.sub(r'LIMIT\s+\d+', 'LIMIT 100', sql, flags=re.IGNORECASE)
 
-    return execute_query(sql, db_name)
+    return execute_query(sql, connection)
 
 
-def execute_query(sql: str, db_name: str = 'ck') -> str:
+def execute_query(sql: str, connection: str = 'ck') -> str:
     """Execute query with history + optimization tracking. Returns JSON."""
     if not _is_query_allowed(sql):
         raise AssertionError("Query must be a read-only operation.")
@@ -497,7 +497,7 @@ def execute_query(sql: str, db_name: str = 'ck') -> str:
     tbl_name = _get_table_name_from_sql(sql)
 
     # Check for optimized version
-    history = _load_query_history(db_name)
+    history = _load_query_history(connection)
     if query_hash in history:
         entry = history[query_hash]
         better_idx = entry.get('better_sql_index')
@@ -509,7 +509,7 @@ def execute_query(sql: str, db_name: str = 'ck') -> str:
 
     try:
         db = DBManager()
-        client = getattr(db, db_name)
+        client = getattr(db, connection)
         result_json = _result_to_json(client, sql)
         query_time = time.time() - start_time
 
@@ -529,7 +529,7 @@ def execute_query(sql: str, db_name: str = 'ck') -> str:
 
         # Slow query optimization
         if query_time > SLOW_QUERY_THRESHOLD_SEC and tbl_name:
-            optimized_sql = query_optimize(tbl_name, sql, db_name)
+            optimized_sql = query_optimize(tbl_name, sql, connection)
             if optimized_sql != sql:
                 new_hash = _generate_query_hash(optimized_sql)
                 history[new_hash] = {
@@ -550,7 +550,7 @@ def execute_query(sql: str, db_name: str = 'ck') -> str:
                 )
                 result_json = json.dumps(result_data, default=str)
 
-        _save_query_history(db_name, history)
+        _save_query_history(connection, history)
         return result_json
 
     except Exception as e:

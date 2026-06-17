@@ -21,10 +21,15 @@ Copy `db_conn_locked/config/db.ini.example` to `db_conn_locked/config/db.ini` an
 
 | Tool | Description |
 |------|-------------|
-| `query(sql, db_name)` | Execute read-only SQL. LIMIT auto-added (default 10, max 100). Returns JSON. |
-| `get_schema(table_name, db_name)` | Get CREATE TABLE with parsed columns, engine, partition. Cached 3 days. |
-| `get_info(table_name, db_name)` | Get row count, indexes, partitions. Cached 3 days. |
-| `get_history(db_name, table_name)` | Query execution history, optionally filtered by table. |
+| `query(sql, connection)` | Execute read-only SQL. LIMIT auto-added (default 10, max 100). Returns JSON. |
+| `get_table_definition(table_name, connection)` | Get CREATE TABLE with parsed columns, engine, partition. Cached 3 days. |
+| `get_info(table_name, connection)` | Get row count, indexes, partitions. Cached 3 days. |
+| `get_history(connection, table_name)` | Query execution history, optionally filtered by table. |
+| `list_connections()` | Discover available connection options from `db.ini`. |
+| `list_tables(connection, database?, like?)` | List tables; always pass `like` to search server-side. |
+| `explain(sql, connection)` | Run `EXPLAIN`; returns plan + cost estimates. |
+
+Set the default connection with `SQL_BUDDY_DEFAULT_CONNECTION` (defaults to `ck`). Each `db.ini` section declares `type = clickhouse|mysql` explicitly; the section-name prefix is used as a fallback.
 
 ## Claude Code Config
 

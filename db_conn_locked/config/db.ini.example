@@ -1,8 +1,13 @@
 # Database Configuration Template
 # Copy this file to db.ini and fill in your actual credentials
 # IMPORTANT: Never commit db.ini to version control!
+#
+# Each section is a "connection" (a configured DB endpoint).
+# Set `type = clickhouse|mysql` explicitly. If omitted, type is inferred from
+# the section-name prefix (ck* -> clickhouse, db*/mysql* -> mysql).
 
 [ck]
+type = clickhouse
 host = localhost
 port = 9000
 user = your_clickhouse_user
@@ -10,6 +15,7 @@ password = your_clickhouse_password
 database = default
 
 [mysql]
+type = mysql
 host = localhost
 port = 3306
 user = your_mysql_user
