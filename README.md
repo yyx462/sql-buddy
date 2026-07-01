@@ -21,7 +21,7 @@ Copy `db_conn_locked/config/db.ini.example` to `db_conn_locked/config/db.ini` an
 
 | Tool | Description |
 |------|-------------|
-| `query(sql, connection)` | Execute read-only SQL. LIMIT auto-added (default 10, max 100). Returns JSON. |
+| `query(sql, connection)` | Execute read-only SQL. LIMIT auto-added if missing (default 10, max 2000); pass explicit `LIMIT N` to get more rows. Returns JSON. |
 | `get_table_definition(table_name, connection)` | Get CREATE TABLE with parsed columns, engine, partition. Cached 3 days. |
 | `get_info(table_name, connection)` | Get row count, indexes, partitions. Cached 3 days. |
 | `get_history(connection, table_name)` | Query execution history, optionally filtered by table. |

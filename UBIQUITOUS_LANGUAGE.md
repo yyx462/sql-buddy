@@ -18,7 +18,7 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 | **Query**           | A single read-only SQL statement the agent asks the server to run                  | sql, statement, request           |
 | **Query hash**      | An 8-char md5 of a **Query**, used as its history key and optimization identity    | hash, id                          |
 | **Query history**   | The persisted log of executed **Queries**, keyed by **Query hash**                 | cache, log                        |
-| **LIMIT**           | A row cap auto-added to SELECT/WITH **Queries** (default 10, clamped to max 100)   | limit clause, row limit           |
+| **LIMIT**           | A row cap auto-added to SELECT/WITH **Queries** (default 10, clamped to max 2000); caller may raise it by writing explicit `LIMIT N` | limit clause, row limit           |
 | **Slow query**      | A **Query** whose execution exceeded the 30-second threshold                       | slow, timeout                     |
 | **Optimized query** | A rewritten **Query** the server records as a faster equivalent of a **Slow query**| better_sql, suggestion            |
 | **Explain**         | Running `EXPLAIN` on a **Query** to return its plan and cost estimates             | plan, cost analysis               |

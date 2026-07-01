@@ -19,6 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db_conn_locked import LockedDBManager as DBManager, connection_type
 
+# LIMIT enforcement for SELECT/WITH queries
+DEFAULT_LIMIT = 10
+MAX_LIMIT = 2000
+
 # Cache directories
 ROOT_DIR = os.environ.get(
     'DB_QUERY_HISTORY_DIR',
@@ -466,7 +470,7 @@ def _sanitize_row(row_dict: dict) -> dict:
 # --- Query Execution ---
 
 def execute_limit_query(sql: str, connection: str = 'ck') -> str:
-    """Execute read-only query. Auto-adds LIMIT (default 10, max 100). Returns JSON with metadata."""
+    """Execute read-only query. Auto-adds LIMIT (default 10, max 2000). Returns JSON with metadata."""
     sql_trimmed = sql.strip().upper()
 
     if not _is_query_allowed(sql):
@@ -478,11 +482,11 @@ def execute_limit_query(sql: str, connection: str = 'ck') -> str:
     # LIMIT enforcement for SELECT and WITH (CTE) queries
     is_select_like = sql_trimmed.startswith('SELECT') or sql_trimmed.startswith('WITH')
     if is_select_like and 'LIMIT' not in sql_trimmed:
-        sql = f"{sql.rstrip().rstrip(';')} LIMIT 10"
+        sql = f"{sql.rstrip().rstrip(';')} LIMIT {DEFAULT_LIMIT}"
     elif is_select_like:
         match = re.search(r'LIMIT\s+(\d+)', sql, re.IGNORECASE)
-        if match and int(match.group(1)) > 100:
-            sql = re.sub(r'LIMIT\s+\d+', 'LIMIT 100', sql, flags=re.IGNORECASE)
+        if match and int(match.group(1)) > MAX_LIMIT:
+            sql = re.sub(r'LIMIT\s+\d+', f'LIMIT {MAX_LIMIT}', sql, flags=re.IGNORECASE)
 
     return execute_query(sql, connection)
 

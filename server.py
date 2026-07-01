@@ -45,7 +45,7 @@ mcp = FastMCP("sql-buddy", instructions=(
     "Use `list_tables` to list tables in a connection. ALWAYS pass `like` param (SQL LIKE, e.g. '%market%') when searching for specific tables — never fetch all then grep. "
     "Use `explain` to run EXPLAIN on a query and get cost estimates. "
     "Resources expose table schemas for configured tables. Use list_resources to discover them. "
-    "LIMIT is auto-added (default 10, max 100) for SELECT and WITH queries. "
+    "LIMIT is auto-added (default 10, max 2000) for SELECT and WITH queries — write an explicit `LIMIT N` (up to 2000) in the SQL to get more rows. "
     "All operations are read-only. "
     "`connection` names a configured DB endpoint (a db.ini section, e.g. 'ck'); `database` in list_tables names a table namespace inside that server."
 ))
@@ -78,7 +78,8 @@ if _RESOURCES_CONFIG:
 @mcp.tool()
 def query(sql: str, connection: str = DEFAULT_CONNECTION) -> str:
     """Execute a read-only SQL query. Returns JSON with columns and rows.
-    LIMIT is auto-added if missing (default 10, max 100)."""
+    LIMIT is auto-added if missing (default 10, max 2000); write an explicit
+    `LIMIT N` (up to 2000) in the SQL to get more rows."""
     try:
         result = execute_limit_query(sql, connection)
         return result
