@@ -11,6 +11,8 @@ from mcp.server.fastmcp.resources import FunctionResource
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db_query import (
+    CONFIG_FILE,
+    check_connection_query,
     execute_limit_query,
     explain_query,
     find_table_query,
@@ -35,21 +37,62 @@ if _raw:
 
 init_dirs()
 
+# One-time setup nudge: never auto-run the wizard, just tell the user to.
+# init.py is invoked manually (`python init.py`) so normal use never prompts.
+if not os.path.exists(CONFIG_FILE):
+    sys.stderr.write(
+        f"[sql-buddy] No db.ini found at {CONFIG_FILE}\n"
+        "[sql-buddy] Configure once with:  python init.py\n"
+    )
+
+
+# --- agent-friendly error hints -------------------------------------------
+# Tools return JSON. On failure we add `connection` (which endpoint failed) and
+# `hint` (the next action an agent should take) so agents can react programmably.
+
+def _hint_for(exc, connection: str | None = None) -> dict:
+    """Map an exception to an actionable hint dict (possibly empty)."""
+    msg = str(exc)
+    low = msg.lower()
+    cls = exc.__class__.__name__
+    if isinstance(exc, AssertionError):
+        return {"hint": "Only SELECT/SHOW/DESCRIBE/EXPLAIN/USE/WITH/EXISTS are allowed (read-only)."}
+    if isinstance(exc, PermissionError):
+        return {"hint": "Write operations are blocked by design - sql-buddy is read-only."}
+    if 'no section' in low or 'unknown connection' in low or cls == 'AttributeError':
+        return {"hint": f"Unknown connection '{connection}'. Call list_connections to list valid names."}
+    if any(k in low for k in ('refused', 'timed out', 'timeout', 'connect', 'socket',
+                              ' eof', 'closed', 'tunnel')):
+        return {"hint": "Transport/connection error. Call check_connection to confirm; in External "
+                        "tunnel mode the user's SSH tunnel may be down. Call list_connections to verify config."}
+    if any(k in low for k in ('access denied', 'authentication', 'auth', 'password', 'login')):
+        return {"hint": "DB authentication failed - ask the user to check user/password in db.ini."}
+    if 'table' in low and any(k in low for k in ('exist', 'not found', 'unknown')):
+        return {"hint": "Table not found on this connection. Call find_table to locate it across all connections."}
+    return {}
+
+
+def _error_json(exc, connection: str | None = None) -> str:
+    payload = {"error": str(exc)}
+    if connection:
+        payload["connection"] = connection
+    payload.update(_hint_for(exc, connection))
+    return json.dumps(payload, default=str)
+
+
 mcp = FastMCP("sql-buddy", instructions=(
-    "Agents SHOULD NOT attempt to do write to database anywhere and SHOULD use this MCP for database read."
-    "Read-only database query server. "
-    "Use `query` to execute SELECT/SHOW/DESCRIBE/EXPLAIN/WITH. "
-    "Use `get_table_definition` to fetch a table's CREATE TABLE. "
-    "Use `get_info` for row counts and indexes. "
-    "Use `get_history` to see past queries. "
-    "Use `list_connections` to discover available connection options. "
-    "Use `list_tables` to list tables in a connection. ALWAYS pass `like` param (SQL LIKE, e.g. '%market%') when searching for specific tables — never fetch all then grep. "
-    "Use `find_table` to locate a table across ALL connections by closeness when you are unsure which connection holds it, or when a query/table lookup failed on a guessed connection — it returns connection + database + qualified_name to query next. "
-    "Use `explain` to run EXPLAIN on a query and get cost estimates. "
-    "Resources expose table schemas for configured tables. Use list_resources to discover them. "
-    "LIMIT is auto-added (default 10, max 2000) for SELECT and WITH queries — write an explicit `LIMIT N` (up to 2000) in the SQL to get more rows. "
-    "All operations are read-only. "
-    "`connection` names a configured DB endpoint (a db.ini section, e.g. 'ck'); `database` in list_tables names a table namespace inside that server."
+    "Read-only database query server. Agents MUST NOT write to the database - use this MCP for reads only. "
+    "Tools: `query` (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH), `get_table_definition` (CREATE TABLE + parsed columns), "
+    "`get_info` (row count + indexes/partitions), `list_tables` (ALWAYS pass `like` e.g. '%market%' - never fetch all then grep), "
+    "`find_table` (locate a table across ALL connections by name closeness), `list_connections` (discover configured endpoints), "
+    "`get_history` (past queries), `explain` (EXPLAIN plan + cost), `check_connection` (ping one connection). "
+    "`connection` names a db.ini section (e.g. 'ck'); `database` in list_tables names a table namespace inside that server. "
+    "LIMIT is auto-added for SELECT/WITH (default 10, max 2000) - write an explicit `LIMIT N` (up to 2000) for more rows. "
+    "Error recovery playbook: on a connection/transport error, call `check_connection` then `list_connections` to verify the name; "
+    "if a table is missing on a guessed connection, call `find_table` and re-query the top match's `connection`+`qualified_name`; "
+    "a 'write blocked' error is expected (read-only). Every error JSON includes a `hint` field with the suggested next action - follow it. "
+    "Tunnels: sql-buddy either opens its own SSH tunnel (Auto mode) or expects one the user runs externally (External mode). "
+    "Connection failures in External mode usually mean the user's tunnel is down - ask them to check it."
 ))
 
 
@@ -81,14 +124,28 @@ if _RESOURCES_CONFIG:
 def query(sql: str, connection: str = DEFAULT_CONNECTION) -> str:
     """Execute a read-only SQL query. Returns JSON with columns and rows.
     LIMIT is auto-added if missing (default 10, max 2000); write an explicit
-    `LIMIT N` (up to 2000) in the SQL to get more rows."""
+    `LIMIT N` (up to 2000) in the SQL to get more rows. On error the JSON
+    includes `connection` and a `hint` with the suggested next action."""
     try:
-        result = execute_limit_query(sql, connection)
-        return result
-    except AssertionError as e:
-        return json.dumps({"error": str(e)})
+        return execute_limit_query(sql, connection)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
+
+
+@mcp.tool()
+def check_connection(connection: str = DEFAULT_CONNECTION) -> str:
+    """Verify a connection is reachable (lightweight SELECT 1 round-trip).
+    Returns JSON {connection, status:'ok', latency_ms} on success, or
+    {connection, status:'error', error, hint} on failure. Use this to diagnose
+    tunnel/connectivity problems before running real queries, or to confirm a
+    setup change. In External tunnel mode, an error usually means the user's
+    SSH tunnel is down."""
+    try:
+        return check_connection_query(connection)
+    except Exception as e:
+        payload = {"connection": connection, "status": "error", "error": str(e)}
+        payload.update(_hint_for(e, connection))
+        return json.dumps(payload, default=str)
 
 
 @mcp.tool()
@@ -98,7 +155,7 @@ def get_table_definition(table_name: str, connection: str = DEFAULT_CONNECTION, 
         result = table_schema_query(table_name, connection, force_refresh)
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
 
 
 @mcp.tool()
@@ -108,7 +165,7 @@ def get_info(table_name: str, connection: str = DEFAULT_CONNECTION, force_refres
         result = table_info_query(table_name, connection, force_refresh)
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
 
 
 @mcp.tool()
@@ -118,7 +175,7 @@ def get_history(connection: str = DEFAULT_CONNECTION, table_name: str | None = N
         result = get_history_queries(connection, table_name)
         return json.dumps(result, indent=2, default=str)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
 
 
 @mcp.tool()
@@ -127,7 +184,7 @@ def list_connections_tool() -> str:
     try:
         return list_connections()
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e)
 
 
 @mcp.tool()
@@ -136,14 +193,14 @@ def list_tables_tool(connection: str = DEFAULT_CONNECTION, database: str | None 
 
     `connection` names the DB endpoint (a db.ini section). `database` optionally
     names a table namespace inside it. ALWAYS use `like` param to search for
-    specific tables — e.g. like='%order%' finds tables containing 'order' in name.
+    specific tables - e.g. like='%order%' finds tables containing 'order' in name.
     This is server-side SQL LIKE, much faster than fetching all tables then grepping.
     Only omit `like` when you genuinely need full listing.
     """
     try:
         return list_tables(connection, database, like)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
 
 
 @mcp.tool()
@@ -163,7 +220,7 @@ def find_table(search: str, limit: int = 10) -> str:
     try:
         return find_table_query(search, limit)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e)
 
 
 @mcp.tool()
@@ -171,10 +228,8 @@ def explain(sql: str, connection: str = DEFAULT_CONNECTION) -> str:
     """Run EXPLAIN on a query and return execution plan with cost estimates. Use to analyze query performance."""
     try:
         return explain_query(sql, connection)
-    except AssertionError as e:
-        return json.dumps({"error": str(e)})
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return _error_json(e, connection)
 
 
 if __name__ == "__main__":

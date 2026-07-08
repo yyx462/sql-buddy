@@ -13,3 +13,4 @@ license = { text = "MIT" }
 
 [project.scripts]
 sql-buddy = "server:main"
+sql-buddy-init = "init:main"

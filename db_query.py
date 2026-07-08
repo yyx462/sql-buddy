@@ -374,11 +374,34 @@ def list_connections() -> str:
     cfg.read(CONFIG_FILE)
     connections = []
     for section in cfg.sections():
+        if section.lower().startswith('ssh:'):
+            continue  # [ssh:*] blocks are bastion defs, not DB connections
         connections.append({
             'name': section,
             'type': connection_type(cfg, section),
         })
     return json.dumps({"connections": connections, "count": len(connections)}, default=str)
+
+
+def check_connection_query(connection: str = 'ck') -> str:
+    """Lightweight SELECT 1 round-trip to verify a connection is reachable.
+
+    Returns JSON {connection, status:'ok', latency_ms} on success. Raises on
+    failure so the caller (the MCP tool) can wrap it with an agent-actionable
+    hint. Triggers the self-managed SSH tunnel for Auto-mode connections.
+    """
+    start = time.time()
+    db = DBManager()
+    client = getattr(db, connection)  # raises AttributeError if unknown; starts tunnel if Auto
+    if hasattr(client, 'query_dataframe'):
+        client.query_dataframe('SELECT 1')
+    else:
+        client.execute('SELECT 1')
+    return json.dumps({
+        "connection": connection,
+        "status": "ok",
+        "latency_ms": round((time.time() - start) * 1000, 1),
+    })
 
 
 def list_tables(connection: str = 'ck', database: str | None = None, like: str | None = None) -> str:
@@ -542,6 +565,8 @@ def find_table_query(search: str, limit: int = 10) -> str:
     searched: list = []
 
     for section in cfg.sections():
+        if section.lower().startswith('ssh:'):
+            continue  # [ssh:*] blocks are bastion defs, not DB connections
         try:
             ctype = connection_type(cfg, section)
         except Exception as e:

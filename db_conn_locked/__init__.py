@@ -13,11 +13,18 @@ import configparser
 from contextlib import contextmanager
 import os
 import re
+import sys
 import uuid
 import pymysql
 from clickhouse_driver import Client
 import pandas as pd
 from typing import Optional, Dict, Tuple, Any
+
+# tunnel.py lives at the repo root; make sure it's importable regardless of cwd.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from tunnel import get_manager as _get_tunnel_manager
 
 
 # Read-Only Filter
@@ -235,8 +242,19 @@ class DBManager:
         section = name.replace("_", "-")
         if section not in self._cfg:
             raise AttributeError(f"No section [{section}] in config")
-        if name in self._cache:
-            return self._cache[name]
+
+        tm = _get_tunnel_manager()
+        block = tm.block_for(section)
+        if block is not None:
+            # Bring up (or confirm) the self-managed SSH tunnel before connecting.
+            tm.ensure_for(section)
+        # Generation changes when the tunnel was (re)started -> the cached client's
+        # TCP socket is dead and must be rebuilt. 0 for non-tunneled connections.
+        gen = tm.generation(block) if block is not None else 0
+
+        cached = self._cache.get(name)
+        if cached is not None and cached['gen'] == gen:
+            return cached['client']
 
         ctype = connection_type(self._cfg, section)
         if ctype == 'clickhouse':
@@ -246,35 +264,43 @@ class DBManager:
         else:
             raise ValueError(f"Unsupported connection type '{ctype}' for [{section}]")
 
-        self._cache[name] = client
+        self._cache[name] = {'client': client, 'gen': gen}
         return client
 
-    def _create_clickhouse_client(self, section: str) -> Client:
+    def _resolve_conn_config(self, section: str, default_port: int) -> dict:
+        """Build driver kwargs for a section: strip meta keys, resolve host/port.
+
+        Self-tunneled connections connect to localhost:local_port (the SSH forward).
+        Otherwise the legacy WSL host-override applies when running inside WSL.
+        """
         conn_config = dict(self._cfg[section])
-        conn_config.pop('type', None)  # `type` is a meta key, not a driver param
-        if self._wsl_host_override and is_wsl():
-            windows_ip = get_windows_host_ip()
-            if windows_ip:
-                conn_config['host'] = windows_ip
-        conn_config['port'] = int(conn_config.get('port', 9000))
-        return Client(**conn_config)
+        # Meta keys consumed elsewhere, not by the DB driver.
+        for meta in ('type', 'tunnel', 'remote_host', 'remote_port', 'local_port'):
+            conn_config.pop(meta, None)
+
+        if _get_tunnel_manager().block_for(section) is not None:
+            conn_config['host'] = 'localhost'
+            conn_config['port'] = int(_get_tunnel_manager().local_port_for(section))
+        else:
+            if self._wsl_host_override and is_wsl():
+                windows_ip = get_windows_host_ip()
+                if windows_ip:
+                    conn_config['host'] = windows_ip
+            conn_config['port'] = int(conn_config.get('port', default_port))
+        return conn_config
+
+    def _create_clickhouse_client(self, section: str) -> Client:
+        return Client(**self._resolve_conn_config(section, 9000))
 
     def _create_mysql_client(self, section: str) -> MySQLConnectionWrapper:
-        conn_config = dict(self._cfg[section])
-        conn_config.pop('type', None)  # `type` is a meta key, not a driver param
-        if self._wsl_host_override and is_wsl():
-            windows_ip = get_windows_host_ip()
-            if windows_ip:
-                conn_config['host'] = windows_ip
-        conn_config['port'] = int(conn_config.get('port', 3306))
-        conn = pymysql.connect(**conn_config)
-        return MySQLConnectionWrapper(conn)
+        return MySQLConnectionWrapper(pymysql.connect(**self._resolve_conn_config(section, 3306)))
 
     def all_clients(self) -> Dict[str, Any]:
-        return self._cache
+        return {name: entry['client'] for name, entry in self._cache.items()}
 
     def close_all(self):
-        for name, client in self._cache.items():
+        for entry in self._cache.values():
+            client = entry['client']
             if hasattr(client, "disconnect"):
                 client.disconnect()
             elif hasattr(client, "close"):
