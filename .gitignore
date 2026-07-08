@@ -6,3 +6,6 @@ database/
 # Database config files (never commit credentials!)
 **/db.ini
 *.ini
+*.ini.bak
+*.bak
+tmp/
