@@ -30,6 +30,7 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 | **Schema**     | The `CREATE TABLE` text of a **Table**, parsed into columns, engine, partition, etc.    | create statement, ddl   |
 | **Table info** | Size/metadata of a **Table**: row count, indexes (MySQL) or partitions (ClickHouse)     | stats, metadata         |
 | **Resource**   | An MCP resource exposing one configured **Table**'s **Schema**, generated from env var | table resource, uri     |
+| **Table locator** | The `find_table` tool: searches every **Connection**'s catalog and ranks **Tables** by name closeness (exact > substring > token > fuzzy) to recover the right **Connection**/**DBMS database** when a guess fails | table finder, locate table |
 
 ## Safety layer
 
@@ -48,6 +49,7 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 - A **Slow query** is linked (via union-find) to at most one **Optimized query**, recorded under its own **Query hash**.
 - A **Schema** describes one **Table** and is cached per **Connection**.
 - A **Resource** exposes one **Table**'s **Schema** and is only generated for **Tables** listed in the config env var.
+- A **Table locator** spans all **Connections**, ranks candidate **Tables** by closeness, and reports each hit's **Connection** + **DBMS database** so the caller stops guessing the endpoint.
 
 ## Example dialogue
 
@@ -66,6 +68,10 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 > **Agent:** "That last `SELECT` took 40 seconds."
 >
 > **Operator:** "That's a **Slow query**. The server records an **Optimized query** and links it to the original **Query hash**, so next time it can suggest the faster version."
+>
+> **Agent:** "I ran `get_table_definition('orders')` on `ck` and it errored."
+>
+> **Operator:** "You guessed the wrong **Connection**. Call the **Table locator** — `find_table('orders')` — it scans every **Connection**'s catalog and returns where `orders` actually lives (e.g. `ck-amazon` / `marketplace.orders`), ranked by closeness. Then re-run against that **Connection** and `qualified_name`."
 
 ## Resolved ambiguities
 

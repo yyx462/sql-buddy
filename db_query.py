@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+import difflib
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -31,6 +32,7 @@ ROOT_DIR = os.environ.get(
 QUERY_HISTORY_DIR = os.path.join(ROOT_DIR, 'query_history')
 DB_INFO_CACHE_DIR = os.path.join(ROOT_DIR, 'db_info_cache')
 DB_SCHEMA_CACHE_DIR = os.path.join(ROOT_DIR, 'db_schema_cache')
+DB_TABLE_LIST_CACHE_DIR = os.path.join(ROOT_DIR, 'table_list_cache')
 
 CACHE_EXPIRE_DAYS = 3
 MAX_HISTORY_ENTRIES = 1000
@@ -39,7 +41,7 @@ CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_conn_
 
 
 def init_dirs():
-    for d in [QUERY_HISTORY_DIR, DB_INFO_CACHE_DIR, DB_SCHEMA_CACHE_DIR]:
+    for d in [QUERY_HISTORY_DIR, DB_INFO_CACHE_DIR, DB_SCHEMA_CACHE_DIR, DB_TABLE_LIST_CACHE_DIR]:
         os.makedirs(d, exist_ok=True)
 
 
@@ -50,6 +52,8 @@ def _get_cache_file_path(cache_type: str, connection: str) -> str:
         return os.path.join(DB_INFO_CACHE_DIR, f'{connection}_table_info.json')
     elif cache_type == 'schema':
         return os.path.join(DB_SCHEMA_CACHE_DIR, f'{connection}_schema.json')
+    elif cache_type == 'tables':
+        return os.path.join(DB_TABLE_LIST_CACHE_DIR, f'{connection}_tables.json')
     raise ValueError(f"Unknown cache type: {cache_type}")
 
 
@@ -409,6 +413,203 @@ def list_tables(connection: str = 'ck', database: str | None = None, like: str |
         return json.dumps({"tables": tables, "count": len(tables)}, default=str)
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+# --- Cross-Connection Table Locator ---
+
+# Namespaces excluded from the global catalog scan (engine-internal, not user data).
+_CK_SYSTEM_DBS = "('system','INFORMATION_SCHEMA','information_schema')"
+_MYSQL_SYSTEM_SCHEMAS = "('information_schema','mysql','performance_schema','sys')"
+
+# Minimum similarity to surface as a fuzzy (typo) match.
+_FUZZY_MIN_SCORE = 0.4
+
+
+def _sanitize_search(s: str) -> str:
+    """Strip a search term to safe alphanumerics before embedding in catalog SQL."""
+    return re.sub(r'[^\w]', '', s or '')
+
+
+def _score_table_name(search: str, candidate: str) -> tuple:
+    """Rank how close `candidate` is to `search`. Returns (score 0..1, match_type)."""
+    s = search.lower()
+    c = candidate.lower()
+    if s == c:
+        return 1.0, 'exact'
+    if s in c:
+        return 0.9, 'substring'
+    if c in s:
+        return 0.8, 'superstring'
+    s_tokens = {t for t in re.split(r'[\W_]+', s) if t}
+    c_tokens = {t for t in re.split(r'[\W_]+', c) if t}
+    overlap = len(s_tokens & c_tokens)
+    ratio = difflib.SequenceMatcher(None, s, c).ratio()
+    if overlap:
+        return min(0.89, 0.7 + 0.1 * overlap + 0.1 * ratio), 'token'
+    return ratio, 'fuzzy'
+
+
+def _catalog_query(ctype: str, search: str) -> str:
+    """Fast-path SQL: server-side case-insensitive substring filter on table name."""
+    if ctype == 'clickhouse':
+        return (
+            "SELECT database AS db_name, name AS tbl_name, engine "
+            "FROM system.tables "
+            f"WHERE positionCaseInsensitive(name, '{search}') > 0 "
+            f"AND database NOT IN {_CK_SYSTEM_DBS}"
+        )
+    return (
+        "SELECT table_schema AS db_name, table_name AS tbl_name, engine "
+        "FROM information_schema.tables "
+        f"WHERE LOWER(table_name) LIKE '%{search}%' "
+        f"AND table_schema NOT IN {_MYSQL_SYSTEM_SCHEMAS}"
+    )
+
+
+def _full_catalog_query(ctype: str) -> str:
+    """Unfiltered catalog for fuzzy fallback (typo recovery). System namespaces excluded."""
+    if ctype == 'clickhouse':
+        return (
+            "SELECT database AS db_name, name AS tbl_name, engine "
+            "FROM system.tables "
+            f"WHERE database NOT IN {_CK_SYSTEM_DBS}"
+        )
+    return (
+        "SELECT table_schema AS db_name, table_name AS tbl_name, engine "
+        "FROM information_schema.tables "
+        f"WHERE table_schema NOT IN {_MYSQL_SYSTEM_SCHEMAS}"
+    )
+
+
+def _exec_catalog(client, sql: str) -> list:
+    """Run a catalog SELECT; return list of (database, table, engine) tuples."""
+    if hasattr(client, 'query_dataframe'):
+        df = client.query_dataframe(sql)
+        if df is None or getattr(df, 'empty', True):
+            return []
+        out = []
+        for row in df.itertuples(index=False, name=None):
+            db_name = str(row[0]) if len(row) > 0 and row[0] is not None else ''
+            tbl = str(row[1]) if len(row) > 1 and row[1] is not None else ''
+            eng = str(row[2]) if len(row) > 2 and row[2] is not None else ''
+            out.append((db_name, tbl, eng))
+        return out
+    result = client.execute(sql, with_column_types=True)
+    if not result or not result[0]:
+        return []
+    data, _ = result
+    return [
+        (str(r[0]), str(r[1]), str(r[2]) if len(r) > 2 and r[2] is not None else '')
+        for r in data
+    ]
+
+
+def _load_table_list_cache(connection: str) -> dict:
+    return _load_json_safe(_get_cache_file_path('tables', connection))
+
+
+def _save_table_list_cache(connection: str, tables: list):
+    _save_json_safe(
+        _get_cache_file_path('tables', connection),
+        {'tables': tables, 'cached_at': datetime.now().isoformat()},
+    )
+
+
+def find_table_query(search: str, limit: int = 10) -> str:
+    """Locate the table closest to `search` across ALL configured connections.
+
+    Fans out over every connection, ranks candidates by name closeness
+    (exact > substring > token > fuzzy), and returns each hit with its
+    `connection` + `database` + `table` (+ `qualified_name`) so the caller can
+    query the right place. Use this when unsure which connection holds a table,
+    or when a query/definition lookup failed on a guessed connection.
+
+    Fast path: server-side name filter (cheap). Fuzzy fallback: cached full
+    table list scored client-side for typo recovery. Per-connection errors are
+    swallowed and reported in `searched_connections` (one dead endpoint never
+    blanks the result).
+    """
+    import configparser
+
+    term = _sanitize_search(search)
+    if not term:
+        return json.dumps({"error": "search must contain alphanumerics", "matches": []})
+
+    cfg = configparser.RawConfigParser()
+    cfg.read(CONFIG_FILE)
+
+    matches: list = []
+    searched: list = []
+
+    for section in cfg.sections():
+        try:
+            ctype = connection_type(cfg, section)
+        except Exception as e:
+            searched.append({"name": section, "type": None,
+                             "status": "error", "error": str(e)})
+            continue
+
+        try:
+            client = getattr(DBManager(), section)
+        except Exception as e:
+            searched.append({"name": section, "type": ctype,
+                             "status": "error", "error": str(e)})
+            continue
+
+        conn_err = None
+        try:
+            rows = _exec_catalog(client, _catalog_query(ctype, term))
+        except Exception as e:
+            rows = []
+            conn_err = str(e)
+
+        # Fast path empty -> fuzzy fallback over cached full table list
+        if not rows:
+            cache = _load_table_list_cache(section)
+            full = cache.get('tables') if (
+                cache and not _is_cache_expired(cache.get('cached_at', ''))
+            ) else None
+            if full is None:
+                try:
+                    full = _exec_catalog(client, _full_catalog_query(ctype))
+                    _save_table_list_cache(section, full)
+                except Exception as e:
+                    conn_err = conn_err or str(e)
+                    full = []
+            rows = full
+
+        scored = []
+        for db_, tbl, eng in rows:
+            score, mtype = _score_table_name(term, tbl)
+            if score < _FUZZY_MIN_SCORE:
+                continue
+            scored.append({
+                "connection": section,
+                "database": db_,
+                "table": tbl,
+                "engine": eng,
+                "score": round(score, 3),
+                "match_type": mtype,
+                "qualified_name": f"{db_}.{tbl}" if db_ else tbl,
+            })
+        matches.extend(scored)
+        searched.append({
+            "name": section, "type": ctype,
+            "status": "error" if (conn_err and not scored) else "ok",
+            "error": conn_err if not scored else None,
+            "match_count": len(scored),
+        })
+
+    matches.sort(key=lambda m: m["score"], reverse=True)
+    top = matches[: max(0, int(limit))]
+
+    return json.dumps({
+        "search": search,
+        "normalized_search": term,
+        "matches": top,
+        "total_matches": len(matches),
+        "searched_connections": searched,
+    }, default=str)
 
 
 # --- Explain ---

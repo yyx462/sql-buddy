@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db_query import (
     execute_limit_query,
     explain_query,
+    find_table_query,
     get_history_queries,
     init_dirs,
     list_connections,
@@ -43,6 +44,7 @@ mcp = FastMCP("sql-buddy", instructions=(
     "Use `get_history` to see past queries. "
     "Use `list_connections` to discover available connection options. "
     "Use `list_tables` to list tables in a connection. ALWAYS pass `like` param (SQL LIKE, e.g. '%market%') when searching for specific tables — never fetch all then grep. "
+    "Use `find_table` to locate a table across ALL connections by closeness when you are unsure which connection holds it, or when a query/table lookup failed on a guessed connection — it returns connection + database + qualified_name to query next. "
     "Use `explain` to run EXPLAIN on a query and get cost estimates. "
     "Resources expose table schemas for configured tables. Use list_resources to discover them. "
     "LIMIT is auto-added (default 10, max 2000) for SELECT and WITH queries — write an explicit `LIMIT N` (up to 2000) in the SQL to get more rows. "
@@ -140,6 +142,26 @@ def list_tables_tool(connection: str = DEFAULT_CONNECTION, database: str | None 
     """
     try:
         return list_tables(connection, database, like)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def find_table(search: str, limit: int = 10) -> str:
+    """Find the table closest to `search` across ALL connections.
+
+    Searches every configured connection (e.g. ck, ck-tk, ck-amazon, db-95-rw),
+    ranks candidates by name closeness (exact > substring > token > fuzzy), and
+    returns each match with `connection`, `database`, `table`, `engine`, `score`,
+    `match_type`, and a `qualified_name` (`database.table`) you can drop into SQL.
+
+    Call this when: you are unsure which connection/database holds a table, OR a
+    query / `get_table_definition` / `get_info` failed because you guessed the
+    wrong connection. Then re-run the real query against the top match's
+    `connection` and `qualified_name`.
+    """
+    try:
+        return find_table_query(search, limit)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
