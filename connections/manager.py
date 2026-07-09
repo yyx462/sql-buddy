@@ -1,24 +1,28 @@
-"""
-Locked Database Connection Manager - Read-Only Filter
+"""DBManager: builds and caches DB clients from db.ini sections.
 
-Usage:
-    from db_conn_locked import LockedDBManager
-
-    db = LockedDBManager()
-    ck = db.ck           # Read-only ClickHouse
-    mysql = db.db        # Read-only MySQL
+`DBManager` returns raw driver clients; `LockedDBManager` returns clients
+wrapped by the read-only guard (the "Locked" layer). Both honor the
+self-managed SSH tunnel (`tunnel.py`): a tunneled connection connects to
+`localhost:local_port`, and the cached client is rebuilt whenever the tunnel's
+generation bumps (the previous TCP socket is dead after a restart).
 """
 
 import configparser
-from contextlib import contextmanager
 import os
-import re
 import sys
 import uuid
+from contextlib import contextmanager
+from typing import Any, Dict, Tuple
+
 import pymysql
 from clickhouse_driver import Client
-import pandas as pd
-from typing import Optional, Dict, Tuple, Any
+
+from .runtime import get_windows_host_ip, is_wsl
+from .wrappers import (
+    LockedClickHouseClient,
+    LockedMySQLConnectionWrapper,
+    MySQLConnectionWrapper,
+)
 
 # tunnel.py lives at the repo root; make sure it's importable regardless of cwd.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,176 +31,7 @@ if _REPO_ROOT not in sys.path:
 from tunnel import get_manager as _get_tunnel_manager
 
 
-# Read-Only Filter
-WRITE_KEYWORDS = [
-    'INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER',
-    'TRUNCATE', 'REPLACE', 'MERGE', 'CALL', 'EXEC', 'EXECUTE',
-    'GRANT', 'REVOKE', 'LOCK', 'UNLOCK', 'SET GLOBAL',
-    'KILL', 'LOAD DATA', 'START TRANSACTION', 'BEGIN'
-]
-
-READ_ONLY_KEYWORDS = [
-    'SELECT', 'SHOW', 'DESCRIBE', 'DESC', 'EXPLAIN',
-    'USE', 'WITH', 'EXISTS', 'CHECK', 'HELP'
-]
-
-
-def _is_write_operation(sql: str) -> bool:
-    sql_upper = sql.strip().upper()
-    for keyword in READ_ONLY_KEYWORDS:
-        if sql_upper.startswith(keyword):
-            return False
-    for keyword in WRITE_KEYWORDS:
-        pattern = r'\b' + keyword + r'\b'
-        if re.search(pattern, sql_upper):
-            if keyword == 'CREATE' and 'SHOW' in sql_upper:
-                continue
-            return True
-    return False
-
-
-def _filter_sql(sql: str) -> str:
-    if _is_write_operation(sql):
-        raise PermissionError(
-            f"Write operation blocked by db_conn_locked. "
-            f"Only READ queries are allowed. Blocked SQL: {sql[:100]}..."
-        )
-    return sql
-
-
-def is_wsl() -> bool:
-    if is_container():
-        return False
-    try:
-        with open('/proc/version', 'r') as f:
-            version = f.read().lower()
-            return 'microsoft' in version or 'wsl' in version
-    except (FileNotFoundError, IOError):
-        return False
-
-
-def is_container() -> bool:
-    if os.path.exists('/.dockerenv'):
-        return True
-    try:
-        with open('/proc/1/cgroup', 'r') as f:
-            cgroup = f.read()
-            if any(sig in cgroup for sig in ['docker', 'containerd', 'kubepods', 'lxc']):
-                return True
-    except (FileNotFoundError, IOError):
-        pass
-    for var in ['DOCKER_CONTAINER', 'DOCKER_ID', 'CONTAINER', 'KUBERNETES_SERVICE_HOST']:
-        if os.environ.get(var):
-            return True
-    return False
-
-
-def get_windows_host_ip() -> Optional[str]:
-    if not is_wsl():
-        return None
-    try:
-        with open('/etc/resolv.conf', 'r') as f:
-            for line in f:
-                if line.strip().startswith('nameserver'):
-                    ip = line.split()[1]
-                    if ip and ip != '127.0.0.1':
-                        return ip
-    except (FileNotFoundError, IOError):
-        pass
-    return None
-
-
 DEFAULT_REMOTE_DB_CREDS: Dict[str, Tuple[str, str]] = {}
-
-
-class MySQLConnectionWrapper:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)
-
-    def db_execute(self, sql: str, params: tuple = None) -> int:
-        cursor = self._conn.cursor()
-        try:
-            cursor.execute(sql, params)
-            self._conn.commit()
-            return cursor.rowcount
-        finally:
-            cursor.close()
-
-    def query_dataframe(self, sql: str) -> pd.DataFrame:
-        cursor = self._conn.cursor(pymysql.cursors.DictCursor)
-        try:
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            return pd.DataFrame(rows)
-        finally:
-            cursor.close()
-
-
-class LockedMySQLConnectionWrapper:
-    def __init__(self, wrapped: MySQLConnectionWrapper):
-        self._wrapped = wrapped
-
-    def __getattr__(self, name):
-        return getattr(self._wrapped, name)
-
-    def cursor(self, *args, **kwargs):
-        return self._wrapped.cursor(*args, **kwargs)
-
-    def commit(self):
-        return self._wrapped.commit()
-
-    def rollback(self):
-        return self._wrapped.rollback()
-
-    def close(self):
-        return self._wrapped.close()
-
-    @property
-    def open(self):
-        return self._wrapped.open
-
-    def db_execute(self, sql: str, params: tuple = None) -> int:
-        _filter_sql(sql)
-        return self._wrapped.db_execute(sql, params)
-
-    def query_dataframe(self, sql: str) -> pd.DataFrame:
-        _filter_sql(sql)
-        return self._wrapped.query_dataframe(sql)
-
-
-class LockedClickHouseClient:
-    def __init__(self, wrapped: Client):
-        self._wrapped = wrapped
-
-    def __getattr__(self, name):
-        return getattr(self._wrapped, name)
-
-    def execute(self, query, params=None, with_column_types=False, settings=None, **kwargs):
-        _filter_sql(query)
-        return self._wrapped.execute(
-            query, params=params,
-            with_column_types=with_column_types,
-            settings=settings, **kwargs
-        )
-
-    def query_dataframe(self, query, params=None, settings=None, **kwargs):
-        _filter_sql(query)
-        result = self._wrapped.execute(query, params=params, settings=settings, with_column_types=True, **kwargs)
-        if result:
-            data, columns = result
-            if data:
-                return pd.DataFrame(data, columns=[c[0] for c in columns])
-        return pd.DataFrame()
-
-    def disconnect(self):
-        return self._wrapped.disconnect()
-
-    @property
-    def connected(self):
-        return self._wrapped.connected
 
 
 def connection_type(cfg, section: str) -> str:
@@ -358,6 +193,3 @@ class LockedDBManager(DBManager):
 
     def _create_mysql_client(self, section: str) -> LockedMySQLConnectionWrapper:
         return LockedMySQLConnectionWrapper(super()._create_mysql_client(section))
-
-
-__all__ = ['DBManager', 'LockedDBManager', 'connection_type', 'get_remote_db', 'is_wsl', 'is_container']

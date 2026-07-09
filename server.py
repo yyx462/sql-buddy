@@ -7,7 +7,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.resources import FunctionResource
 
-# Ensure db_conn_locked is importable
+# Ensure connections is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db_query import (

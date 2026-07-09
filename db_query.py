@@ -18,7 +18,7 @@ logging.basicConfig(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db_conn_locked import LockedDBManager as DBManager, connection_type
+from connections import LockedDBManager as DBManager, connection_type
 
 # LIMIT enforcement for SELECT/WITH queries
 DEFAULT_LIMIT = 10
@@ -36,8 +36,7 @@ DB_TABLE_LIST_CACHE_DIR = os.path.join(ROOT_DIR, 'table_list_cache')
 
 CACHE_EXPIRE_DAYS = 3
 MAX_HISTORY_ENTRIES = 1000
-SLOW_QUERY_THRESHOLD_SEC = 30
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db_conn_locked', 'config', 'db.ini')
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini')
 
 
 def init_dirs():
@@ -135,32 +134,6 @@ def _result_to_json(client, sql: str) -> str:
             "rows": rows,
             "row_count": len(rows),
         }, default=str)
-
-
-# --- Union-Find for optimization tracking ---
-
-class UnionFind:
-    def __init__(self):
-        self.parent = {}
-
-    def find(self, x: str) -> str:
-        if x not in self.parent:
-            self.parent[x] = x
-            return x
-        if self.parent[x] != x:
-            self.parent[x] = self.find(self.parent[x])
-        return self.parent[x]
-
-    def union(self, x: str, y: str):
-        rx, ry = self.find(x), self.find(y)
-        if rx != ry:
-            self.parent[ry] = rx
-
-    def is_same_group(self, x: str, y: str) -> bool:
-        return self.find(x) == self.find(y)
-
-
-_uf = UnionFind()
 
 
 # --- Schema ---
@@ -320,22 +293,6 @@ def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool 
         if tbl_name in cache:
             return cache[tbl_name]
         return {'error': str(e)}
-
-
-# --- Query Optimization ---
-
-def query_optimize(tbl_name: str, query: str, connection: str = 'ck') -> str:
-    schema_info = table_schema_query(tbl_name, connection)
-    optimized = query
-
-    time_cols = schema_info.get('time_columns', [])
-    if time_cols and 'WHERE' not in query.upper():
-        optimized = f"-- Suggestion: Add time filter on {time_cols[0]}\n{query}"
-
-    if 'ORDER BY' in query.upper() and 'LIMIT' not in query.upper():
-        optimized = f"{query.rstrip().rstrip(';')} LIMIT 1000"
-
-    return optimized
 
 
 # --- History ---
@@ -718,24 +675,13 @@ def execute_limit_query(sql: str, connection: str = 'ck') -> str:
 
 
 def execute_query(sql: str, connection: str = 'ck') -> str:
-    """Execute query with history + optimization tracking. Returns JSON."""
+    """Execute a read-only query and record it in history. Returns JSON."""
     if not _is_query_allowed(sql):
         raise AssertionError("Query must be a read-only operation.")
 
     start_time = time.time()
     query_hash = _generate_query_hash(sql)
     tbl_name = _get_table_name_from_sql(sql)
-
-    # Check for optimized version
-    history = _load_query_history(connection)
-    if query_hash in history:
-        entry = history[query_hash]
-        better_idx = entry.get('better_sql_index')
-        if better_idx and better_idx in history:
-            if not _uf.is_same_group(query_hash, better_idx):
-                optimized_sql = history[better_idx].get('sql', sql)
-                if optimized_sql != sql:
-                    sql = optimized_sql
 
     try:
         db = DBManager()
@@ -746,42 +692,18 @@ def execute_query(sql: str, connection: str = 'ck') -> str:
         # Inject query_time into result
         result_data = json.loads(result_json)
         result_data['query_time_ms'] = round(query_time * 1000, 1)
-        result_json = json.dumps(result_data, default=str)
 
         # Save to history
+        history = _load_query_history(connection)
         history[query_hash] = {
             'sql': sql,
             'query_time': query_time,
             'table_name': tbl_name,
             'executed_at': datetime.now().isoformat(),
-            'better_sql_index': history.get(query_hash, {}).get('better_sql_index'),
         }
-
-        # Slow query optimization
-        if query_time > SLOW_QUERY_THRESHOLD_SEC and tbl_name:
-            optimized_sql = query_optimize(tbl_name, sql, connection)
-            if optimized_sql != sql:
-                new_hash = _generate_query_hash(optimized_sql)
-                history[new_hash] = {
-                    'sql': optimized_sql,
-                    'query_time': None,
-                    'table_name': tbl_name,
-                    'executed_at': datetime.now().isoformat(),
-                    'better_sql_index': None,
-                    'optimized_from': query_hash,
-                }
-                _uf.union(query_hash, new_hash)
-                history[query_hash]['better_sql_index'] = new_hash
-
-                # Add optimization hint to result
-                result_data = json.loads(result_json)
-                result_data['optimization_hint'] = (
-                    f"Query took {query_time:.1f}s. Consider: {optimized_sql[:200]}"
-                )
-                result_json = json.dumps(result_data, default=str)
-
         _save_query_history(connection, history)
-        return result_json
+
+        return json.dumps(result_data, default=str)
 
     except Exception as e:
         return json.dumps({"error": str(e)})

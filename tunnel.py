@@ -37,7 +37,7 @@ import time
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'db_conn_locked', 'config', 'db.ini'
+    os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini'
 )
 
 # ssh defaults
@@ -55,7 +55,7 @@ STDERR_TAIL_LINES = 50
 # --- config parsing -------------------------------------------------------
 
 def _normalize(section: str) -> str:
-    """Match db_conn_locked's `_`/`-` interchangeability for connection names."""
+    """Match the connection manager's `_`/`-` interchangeability for connection names."""
     return section.replace('_', '-')
 
 
@@ -143,7 +143,7 @@ class TunnelManager:
             self._loaded = False
             self._load()
 
-    # -- introspection (used by db_conn_locked) --
+    # -- introspection (used by the connection manager) --
     def tunnel_for(self, conn_section: str):
         """Return (block, local_port, remote_host, remote_port) or None if not tunneled."""
         self._load()

@@ -16,11 +16,9 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 | Term                | Definition                                                                         | Aliases to avoid                  |
 | ------------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
 | **Query**           | A single read-only SQL statement the agent asks the server to run                  | sql, statement, request           |
-| **Query hash**      | An 8-char md5 of a **Query**, used as its history key and optimization identity    | hash, id                          |
+| **Query hash**      | An 8-char md5 of a **Query**, used as its history key    | hash, id                          |
 | **Query history**   | The persisted log of executed **Queries**, keyed by **Query hash**                 | cache, log                        |
 | **LIMIT**           | A row cap auto-added to SELECT/WITH **Queries** (default 10, clamped to max 2000); caller may raise it by writing explicit `LIMIT N` | limit clause, row limit           |
-| **Slow query**      | A **Query** whose execution exceeded the 30-second threshold                       | slow, timeout                     |
-| **Optimized query** | A rewritten **Query** the server records as a faster equivalent of a **Slow query**| better_sql, suggestion            |
 | **Explain**         | Running `EXPLAIN` on a **Query** to return its plan and cost estimates             | plan, cost analysis               |
 
 ## Introspection
@@ -46,7 +44,6 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 - A **Connection** points at one server and gives access to many **DBMS databases**, each holding many **Tables**.
 - A **Table** belongs to exactly one **DBMS database** and is reached through exactly one **Connection**.
 - A **Query** runs against one **Connection** and reads one or more **Tables**; it produces exactly one **Query hash**.
-- A **Slow query** is linked (via union-find) to at most one **Optimized query**, recorded under its own **Query hash**.
 - A **Schema** describes one **Table** and is cached per **Connection**.
 - A **Resource** exposes one **Table**'s **Schema** and is only generated for **Tables** listed in the config env var.
 - A **Table locator** spans all **Connections**, ranks candidate **Tables** by closeness, and reports each hit's **Connection** + **DBMS database** so the caller stops guessing the endpoint.
@@ -64,10 +61,6 @@ SQL Buddy: a read-only database access server exposed over the MCP protocol for 
 > **Agent:** "What if I try an `UPDATE`?"
 >
 > **Operator:** "Blocked. The **Locked** layer sees a **Write keyword** and refuses before it ever hits the server. Everything stays **Read-only**. And remember every `SELECT` gets a **LIMIT** — 10 rows unless you say more, capped at 100."
->
-> **Agent:** "That last `SELECT` took 40 seconds."
->
-> **Operator:** "That's a **Slow query**. The server records an **Optimized query** and links it to the original **Query hash**, so next time it can suggest the faster version."
 >
 > **Agent:** "I ran `get_table_definition('orders')` on `ck` and it errored."
 >
