@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """sql-buddy interactive setup wizard.
 
-Asks how you reach your databases and writes `db_conn_locked/config/db.ini` in
+Asks how you reach your databases and writes `connections/config/db.ini` in
 the right shape:
 
   - Auto     : sql-buddy opens the SSH tunnel itself. You give a bastion + key
@@ -21,7 +21,7 @@ import sys
 from getpass import getpass
 
 CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'db_conn_locked', 'config', 'db.ini'
+    os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini'
 )
 
 

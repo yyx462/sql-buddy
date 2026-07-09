@@ -119,8 +119,8 @@ during normal use (the choice persists in `db.ini`).
 Or do it by hand - copy the template, then edit it:
 
 ```bash
-cp db_conn_locked/config/db.ini.example db_conn_locked/config/db.ini
-$EDITOR db_conn_locked/config/db.ini
+cp connections/config/db.ini.example connections/config/db.ini
+$EDITOR connections/config/db.ini
 ```
 
 Each database is one **section** in this file. A section's name (the `[bracketed]` word)
@@ -234,6 +234,17 @@ Add SQL Buddy to your MCP client's config. For **Claude Code**, edit
 }
 ```
 
+> ⚠️ **The `command` path must exist before this works.** `…/.venv/bin/python` is
+> created in Step 1's install (`uv venv .venv … && uv pip install -e .`). If you
+> skipped install, the MCP server fails to start with a "no such file" error.
+> Verify, and create it if missing:
+>
+> ```bash
+> ls /absolute/path/to/sql-buddy/.venv/bin/python     # should print the path back
+> # if it's missing, run Step 1 first, then wire up the MCP config:
+> cd /absolute/path/to/sql-buddy && uv venv .venv --python 3.11 && uv pip install -e .
+> ```
+
 Then restart your client. Ask your agent something like *"list the tables in the `ck`
 connection"* - if it can answer, you're live. 🎉
 
@@ -269,7 +280,7 @@ value below. Ask the user explicitly, one at a time, in plain language.
      tunnel port). No `tunnel`/`remote_*`/`local_port` keys.
    - The **read-only database user** and **password**.
    - The default **database** name (ClickHouse) - optional for MySQL.
-5. **Write `db_conn_locked/config/db.ini`** (see `db.ini.example` for the shape):
+5. **Write `connections/config/db.ini`** (see `db.ini.example` for the shape):
    - Auto: one `[ssh:*]` section for the bastion + each connection with
      `tunnel = ssh:*` and its `remote_host`/`remote_port`/`local_port` (no `host`/`port`).
    - External: each connection with `host`/`port`/`user`/`password` (and `database` for
@@ -280,7 +291,14 @@ value below. Ask the user explicitly, one at a time, in plain language.
    follow it (in External mode an error usually means the user's tunnel is down).
 7. **Confirm `db.ini` is not tracked** by git (`git status` should not list it).
 8. **Register the MCP server** in the user's client config with absolute paths to their
-   `.venv/bin/python` and `server.py`.
+   `.venv/bin/python` and `server.py`. **Confirm the venv exists first** — that
+   `command` path is created only by step 1's install; if it's missing the server
+   will not start (the MCP client typically fails silently or logs a "no such file").
+   Verify and create in one shot:
+   ```bash
+   test -x /abs/path/to/sql-buddy/.venv/bin/python && echo "venv ok" \
+     || (cd /abs/path/to/sql-buddy && uv venv .venv --python 3.11 && uv pip install -e .)
+   ```
 
 Never write credentials to anywhere except `db.ini`. Never commit `db.ini`. When using
 the running server, every tool error JSON carries a `hint` - follow it rather than
@@ -326,8 +344,8 @@ table hints at `find_table`. Agents should read and follow the `hint`.
 ### File layout
 
 ```
-db_conn_locked/config/db.ini          # your credentials + ssh blocks (gitignored, never commit)
-db_conn_locked/config/db.ini.example  # template (committed)
+connections/config/db.ini          # your credentials + ssh blocks (gitignored, never commit)
+connections/config/db.ini.example  # template (committed)
 database/                             # caches + query history (gitignored)
 server.py                             # MCP server entrypoint
 db_query.py                           # query logic
@@ -354,7 +372,7 @@ they must be the DB's address **as seen from the bastion**, not from your laptop
 -> The `connection` name must match a `[section]` in `db.ini`. Run
 `list_connections()` to see what's configured. Check `SQL_BUDDY_DEFAULT_CONNECTION`.
 
-**"Write operation blocked by db_conn_locked"**
+**"Write operation blocked by sql-buddy's read-only guard"**
 -> This is **working as intended.** SQL Buddy rejected a mutating statement. Use a
 different tool if you genuinely need to change data - SQL Buddy cannot do it.
 
@@ -371,7 +389,7 @@ them with `pkill -f 'ssh -N .*127.0.0.1:<local_port>'` or `pkill -af 'ssh -N'`.
 -> Stop. Do **not** commit it. It should be gitignored. If it's already tracked, remove it
 from git history (it contains live credentials):
 ```bash
-git rm --cached db_conn_locked/config/db.ini
+git rm --cached connections/config/db.ini
 ```
 
 ---
