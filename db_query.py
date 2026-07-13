@@ -18,6 +18,8 @@ logging.basicConfig(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import db_security as _security
+
 from connections import LockedDBManager as DBManager, connection_type
 
 # LIMIT enforcement for SELECT/WITH queries
@@ -326,9 +328,10 @@ def get_history_queries(connection: str = 'ck', tbl_name: Optional[str] = None) 
 
 def list_connections() -> str:
     """List available connection options from config. Returns JSON."""
-    import configparser
-    cfg = configparser.RawConfigParser()
-    cfg.read(CONFIG_FILE)
+    try:
+        cfg = DBManager.load_config(CONFIG_FILE)
+    except FileNotFoundError as e:
+        return json.dumps({"connections": [], "count": 0, "error": str(e)}, default=str)
     connections = []
     for section in cfg.sections():
         if section.lower().startswith('ssh:'):
@@ -515,8 +518,7 @@ def find_table_query(search: str, limit: int = 10) -> str:
     if not term:
         return json.dumps({"error": "search must contain alphanumerics", "matches": []})
 
-    cfg = configparser.RawConfigParser()
-    cfg.read(CONFIG_FILE)
+    cfg = DBManager.load_config(CONFIG_FILE)
 
     matches: list = []
     searched: list = []
@@ -696,7 +698,7 @@ def execute_query(sql: str, connection: str = 'ck') -> str:
         # Save to history
         history = _load_query_history(connection)
         history[query_hash] = {
-            'sql': sql,
+            'sql': _security.sanitize_text(sql),
             'query_time': query_time,
             'table_name': tbl_name,
             'executed_at': datetime.now().isoformat(),

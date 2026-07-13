@@ -1,8 +1,29 @@
 """SQL Buddy MCP Server - Read-only database access via MCP protocol."""
 
+import sys, os
+# Load bundled deps from sandbox-accessible _vendor directory
+_VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
+if os.path.isdir(_VENDOR):
+    sys.path.insert(0, _VENDOR)
+    if sys.platform == "win32":
+        for _extra in (
+            os.path.join(_VENDOR, "win32", "lib"),
+            os.path.join(_VENDOR, "win32"),
+            os.path.join(_VENDOR, "pythonwin"),
+        ):
+            if os.path.isdir(_extra) and _extra not in sys.path:
+                sys.path.insert(0, _extra)
+        _dll_dir = os.path.join(_VENDOR, "pywin32_system32")
+        if os.path.isdir(_dll_dir):
+            try:
+                os.add_dll_directory(_dll_dir)
+            except OSError:
+                pass
+
+import db_security
+db_security.install()
+
 import json
-import os
-import sys
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.resources import FunctionResource

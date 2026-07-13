@@ -36,6 +36,16 @@ import time
 
 logger = logging.getLogger(__name__)
 
+# Import shared config helpers from the connections package, avoiding any
+# circular-import risk by importing from the leaf module rather than the
+# connections __init__ (which imports DBManager -> tunnel).
+try:
+    from connections.config_util import read_config as _read_config, resolve_env as _resolve_env
+except ImportError:
+    _resolve_env = None
+    _read_config = None
+
+
 _CONFIG_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini'
 )
@@ -127,8 +137,7 @@ class TunnelManager:
     def _load(self):
         if self._loaded:
             return
-        cfg = configparser.RawConfigParser()
-        cfg.read(self._config_file)
+        cfg = _read_config(self._config_file)
         self._cfg = cfg
         self._blocks = _ssh_blocks(cfg)
         self._conn_tunnels = _conn_tunnels(cfg)
@@ -183,11 +192,11 @@ class TunnelManager:
 
     def _build_cmd(self, block: str, forwards: list) -> list:
         p = self._blocks[block]
-        key = os.path.expanduser(p['key'])
-        ssh_port = int(p.get('port', DEFAULT_SSH_PORT))
-        alive_int = p.get('server_alive_interval', DEFAULT_ALIVE_INTERVAL)
-        alive_max = p.get('server_alive_count_max', DEFAULT_ALIVE_COUNT_MAX)
-        user, host = p['user'], p['host']
+        key = os.path.expanduser(_resolve_env(p['key']))
+        ssh_port = int(_resolve_env(p.get('port', DEFAULT_SSH_PORT)))
+        alive_int = _resolve_env(p.get('server_alive_interval', DEFAULT_ALIVE_INTERVAL))
+        alive_max = _resolve_env(p.get('server_alive_count_max', DEFAULT_ALIVE_COUNT_MAX))
+        user, host = _resolve_env(p['user']), _resolve_env(p['host'])
 
         cmd = [
             'ssh', '-N',

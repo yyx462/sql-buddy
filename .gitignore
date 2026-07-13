@@ -8,4 +8,6 @@ database/
 *.ini
 *.ini.bak
 *.bak
+.env
+.env.local
 tmp/

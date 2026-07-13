@@ -17,6 +17,7 @@ from typing import Any, Dict, Tuple
 import pymysql
 from clickhouse_driver import Client
 
+from .config_util import read_config, resolve_env
 from .runtime import get_windows_host_ip, is_wsl
 from .wrappers import (
     LockedClickHouseClient,
@@ -61,8 +62,7 @@ class DBManager:
         if not os.path.exists(config_file):
             raise FileNotFoundError(f"Config file not found: {config_file}")
 
-        cfg = configparser.RawConfigParser()
-        cfg.read(config_file)
+        cfg = read_config(config_file)
         self.config_file = config_file
         self._cfg = cfg
         self._cache = {}
@@ -72,6 +72,14 @@ class DBManager:
     @classmethod
     def get(cls, name: str, config_file: str = None, **kwargs):
         return cls(config_file, **kwargs).getattr(name)
+
+    @staticmethod
+    def load_config(config_file: str) -> configparser.RawConfigParser:
+        if config_file is None:
+            config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'db.ini')
+        if not os.path.exists(config_file):
+            raise FileNotFoundError(f"Config file not found: {config_file}")
+        return read_config(config_file)
 
     def __getattr__(self, name: str):
         section = name.replace("_", "-")
@@ -112,6 +120,8 @@ class DBManager:
         # Meta keys consumed elsewhere, not by the DB driver.
         for meta in ('type', 'tunnel', 'remote_host', 'remote_port', 'local_port'):
             conn_config.pop(meta, None)
+        for k, v in list(conn_config.items()):
+            conn_config[k] = resolve_env(str(v))
 
         if _get_tunnel_manager().block_for(section) is not None:
             conn_config['host'] = 'localhost'
