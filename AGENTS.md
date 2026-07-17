@@ -1,0 +1,81 @@
+# AGENTS.md — SQL Buddy
+
+This file is read by both humans and the Review agent (pi). It defines the
+coding standards AND the review rubric in one place so they never drift.
+The full domain language (Connection, Query, Locked layer, etc.) lives in
+`UBIQUITOUS_LANGUAGE.md` — read it before touching anything security-sensitive.
+
+## What SQL Buddy is
+
+A read-only MCP server that lets an AI agent query MySQL and ClickHouse
+databases. Every path is forced read-only via a **Locked** layer that blocks
+write keywords before they reach the network. The crown jewel is this
+read-only invariant — protect it above all else.
+
+## Review rubric
+
+When reviewing a pull request, classify each finding into one of two tiers.
+The pipeline derives the verdict label from the tiers (the agent does NOT pick
+the label itself):
+
+- **Any Tier-1 finding → `needs-work`**
+- **Else any Tier-2 finding → `good-attempt`**
+- **Else → `agent:approved`**
+
+### Tier 1 — Blocking (→ `needs-work`)
+
+1. **Read-only invariant.** Any code path that could send a Write keyword
+   (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`,
+   `GRANT`, …) to a real database, or that bypasses, weakens, or circumvents
+   the **Locked** layer. Every new tool or endpoint that issues SQL MUST route
+   it through the locked executor. Dynamic SQL that could evade keyword
+   detection is a Tier-1 finding.
+
+2. **Secret / credential safety.** Database credentials, SSH tunnel private
+   keys, `db.ini` connection configs, or API tokens must never be logged,
+   echoed to stdout, committed to the repo, or returned in MCP responses or
+   error messages.
+
+3. **Correctness.** Logic errors, broken error handling, crashes on valid
+   input, resource leaks (unclosed SSH tunnels, DB connections, or file
+   handles), race conditions.
+
+### Tier 2 — Minor (→ `good-attempt` if no Tier 1)
+
+4. **Ubiquitous-language discipline.** Reintroducing retired terms
+   (`db_name`, `list_databases`, calling a namespace a "schema") or conflating
+   **Connection** (a `db.ini` section / the `connection` param) with
+   **DBMS database** (a table namespace / the `database` param). See
+   `UBIQUITOUS_LANGUAGE.md` — the "Resolved ambiguities" section is the
+   authoritative list.
+
+5. **API consistency.** Respecting tool and parameter names, LIMIT semantics
+   (auto-added default 10, max 2000), and the cache model (`query_history/`
+   audit log vs `db_info_cache/` + `db_schema_cache/` with 3-day freshness).
+
+6. **Quality.** Naming, style, small refactors, doc accuracy, obvious
+   performance regressions (e.g. unbounded result sets, N+1 introspection
+   queries).
+
+### Below the bar
+
+Trivial nitpicks (a missing trailing newline, subjective preference) are
+**ignored, not commented**. Keep comments signal-heavy.
+
+## Output contract
+
+When invoked as the Review agent, output ONLY a JSON object — no prose, no
+markdown fences:
+
+```json
+{
+  "summary": "One-paragraph overall assessment of the PR.",
+  "findings": [
+    {"tier": 1, "path": "db_query.py", "line": 142, "message": "Bypasses the Locked layer."},
+    {"tier": 2, "path": "server.py", "line": 30, "message": "Uses retired term 'db_name'."}
+  ]
+}
+```
+
+If there are no findings: `{"summary": "...", "findings": []}`. The pipeline
+reads this JSON, derives the label from the tiers, and posts the comment.

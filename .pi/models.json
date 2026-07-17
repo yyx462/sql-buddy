@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "MiniMax provider config for the Review agent (pi).",
+    "",
+    "The Jenkinsfile injects MINIMAX_API_KEY (from the Jenkins credential",
+    "'minimax-auth-token') and MINIMAX_BASE_URL at runtime, then invokes pi",
+    "with --provider minimax --model MiniMax-M3.",
+    "",
+    "This file defines the custom provider entry that maps those env vars to",
+    "pi's provider system. MiniMax speaks the Anthropic Messages API, so the",
+    "api type is 'anthropic'. Verify the exact schema against pi's",
+    "packages/coding-agent/docs/custom-provider.md and adjust field names if needed.",
+    "",
+    "The API key is NEVER hardcoded here — it comes from $MINIMAX_API_KEY."
+  ],
+  "providers": [
+    {
+      "name": "minimax",
+      "displayName": "MiniMax M3",
+      "api": "anthropic",
+      "baseURL": "https://api.minimaxi.com/anthropic",
+      "apiKeyEnv": "MINIMAX_API_KEY",
+      "models": [
+        {
+          "id": "MiniMax-M3",
+          "displayName": "MiniMax-M3",
+          "toolCall": true,
+          "default": true
+        }
+      ]
+    }
+  ]
+}
