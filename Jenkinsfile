@@ -33,7 +33,7 @@ pipeline {
     agent {
         node {
             label 'web01'
-            customWorkspace '/data/www/sql-buddy-review'
+            customWorkspace '/data/www/algo_review'
         }
     }
 
