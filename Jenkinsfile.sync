@@ -79,10 +79,13 @@ pipeline {
                     echo "skip: PR closed without merge"
                     exit 0
                 fi
-                if [ "$AUTHOR" = "$MAINTAINER" ]; then
-                    echo "skip: PR authored by maintainer ($MAINTAINER) — maintainer merges handled locally"
-                    exit 0
-                fi
+                # NOTE: unlike the review pipeline, the sync pipeline does NOT
+                # skip on $AUTHOR == $MAINTAINER. The maintainer authors most
+                # PRs and merges them in the UI; the workspace should
+                # fast-forward to origin/master either way — otherwise the
+                # next SSH login hits the divergent-branches prompt. The review
+                # pipeline keeps the maintainer skip (self-review is sensible);
+                # the two pipelines deliberately differ on this rule.
                 if [ "$DRAFT" = "true" ]; then
                     echo "skip: draft PR"
                     exit 0
