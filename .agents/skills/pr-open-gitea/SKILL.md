@@ -1,14 +1,21 @@
 # Open a PR via the Gitea API
 
 Open a pull request on this repo's Gitea instance using only the
-`$GITEA_TOKEN` env var — no `gh`, no `tea`, no manual web UI. Project-scoped:
+`GITEA_TOKEN` env var — no `gh`, no `tea`, no manual web UI. Project-scoped:
 this skill is for `sql-buddy` only and bakes in its repo + base branch.
+
+This skill also ships `pr_merged.py`, a small read-only script the agent runs
+to authoritatively check whether a PR is merged — to defeat the
+"PR-not-merged" hallucination (the agent's local `master` may be stale or it
+may misread Gitea's UI text into thinking an already-merged PR is still open).
 
 ## When to use
 
 - The agent has finished committing on a local branch and is asked to open
   a pull request against `master`.
 - A web PR form / CLI is unavailable or undesirable.
+- Before any statement of the form "PR #N is/ isn't merged", **run
+  `pr_merged.py`** instead of trusting memory or local git state.
 
 Do **not** use this skill for any other repository — write a new skill there
 with the correct `REPO` / `BASE` / `INSTANCE`, do not parameterize this one.
@@ -104,3 +111,47 @@ include the smoke test you ran and its observed output>
   merges").
 - Commenting on an existing PR (use a future `pr-comment-gitea` skill).
 - Cross-fork PRs (this skill assumes same-owner head and base).
+
+## Bundled script: `pr_merged.py`
+
+Authoritative merged-state check via the Gitea API (`GET /pulls/{index}`).
+Sits next to this `SKILL.md` in `.agents/skills/pr-open-gitea/`.
+
+Why it exists: the agent has been observed claiming an already-merged PR is
+still open. Stale local `master`, misread UI text, or just plain
+hallucination — the fix is to ask the API, not the model's memory.
+
+### Usage
+
+```bash
+python3 .agents/skills/pr-open-gitea/pr_merged.py <PR_NUMBER>
+# optional: GITEA_TOKEN=... python3 pr_merged.py 4
+```
+
+### Output (one line, machine-parseable)
+
+- Merged:  `PR #4: MERGED into ying.yuxiang/sql-buddy at <TS>` + merge_commit
+  + head_sha lines, exit `0`.
+- Not merged (open or closed-without-merge): `PR #4: NOT MERGED — state=open,
+  merged=False`, exit `1`.
+- API error / 404 / bad PR number: stderr message, exit `2`.
+
+### Auth
+
+- Uses `$GITEA_TOKEN` if set. The token's read scope is sufficient; `write:*`
+  scopes (which is what we have for opening PRs) also work.
+- If the token is missing or 401s, falls back to an unauthenticated GET — the
+  Gitea repo is public so reads succeed without auth.
+
+### Agent rule
+
+Before writing or saying "PR #N is merged" / "PR #N is not merged", **always
+run this script first**. Never derive merge state from local `git log`,
+`git branch -r`, `git rev-parse origin/master`, or memory. Those lie. The
+API does not.
+
+### Safety
+
+- Read-only: issues a single `GET`. Never mutates anything.
+- Token is read from env, never echoed. Same hygiene rules as the rest of
+  this skill (see Token hygiene above).
