@@ -1,7 +1,7 @@
 # SQL Buddy
 
-A read-only **MCP server** that lets your AI agent (Claude Code, and any MCP-compatible
-client) safely query your **MySQL** and **ClickHouse** databases.
+A read-only **MCP server** that lets your AI agent (Claude Code, and any
+MCP-compatible client) safely query your **MySQL** and **ClickHouse** databases.
 
 Your agent asks questions in plain language; SQL Buddy runs the SQL, enforces
 **read-only** (no `INSERT`/`UPDATE`/`DROP` ever reaches your data), adds safety
