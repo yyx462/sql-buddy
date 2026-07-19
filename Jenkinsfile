@@ -47,12 +47,18 @@ pipeline {
     }
 
     environment {
-        GITEA_URL        = 'https://git.sh.nint.com'
-        MAINTAINER       = 'ying.yuxiang'
-        GITEA_TOKEN_FILE = '/data/www/algo/deps/gitea-token'
-        IMAGE            = 'sql-buddy-review'
-        MINIMAX_MODEL    = 'MiniMax-M3'
-        REVIEW_PROMPT    = 'Review pull request #$PR_NUMBER. The unified diff is at /workspace/pr.diff — read it first. Then explore the repository as needed to evaluate each change against the rubric in AGENTS.md. Follow the pr-review skill: classify each finding into tier 1 (blocking) or tier 2 (minor). Output ONLY a JSON object: {"summary": "...", "findings": [{"tier": 1, "path": "...", "line": 0, "message": "..."}]}. If there are no findings, output {"summary": "...", "findings": []}. Output nothing except the JSON.'
+        GITEA_URL             = 'https://git.sh.nint.com'
+        MAINTAINER            = 'ying.yuxiang'
+        GITEA_TOKEN_FILE      = '/data/www/algo/deps/gitea-token'
+        IMAGE                 = 'sql-buddy-review'
+        MINIMAX_MODEL         = 'MiniMax-M3'
+        // Python interpreter lives in the shared uv-managed install (mirrors
+        // amazon_alg's Jenkinsfile). The agent's default sh PATH doesn't
+        // include /usr/bin/python3, so we go through uv to find python.
+        UV                    = '/data/www/algo/deps/uv'
+        UV_CACHE_DIR          = '/data/www/algo/deps/uv-cache'
+        UV_PYTHON_INSTALL_DIR = '/data/www/algo/deps/uv-python'
+        REVIEW_PROMPT         = 'Review pull request #$PR_NUMBER. The unified diff is at /workspace/pr.diff — read it first. Then explore the repository as needed to evaluate each change against the rubric in AGENTS.md. Follow the pr-review skill: classify each finding into tier 1 (blocking) or tier 2 (minor). Output ONLY a JSON object: {"summary": "...", "findings": [{"tier": 1, "path": "...", "line": 0, "message": "..."}]}. If there are no findings, output {"summary": "...", "findings": []}. Output nothing except the JSON.'
     }
 
     triggers {
@@ -199,7 +205,10 @@ pipeline {
                 { set +x; } 2>/dev/null
                 export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE")"
                 { set -x; } 2>/dev/null
-                python3 ci/review_post.py \
+                # Run ci/review_post.py via the uv-managed python install
+                # (agent's default sh PATH doesn't include /usr/bin/python3).
+                # --no-project so uv ignores sql-buddy's own pyproject.toml.
+                "$UV" run --no-project python ci/review_post.py \
                     --gitea-url "$GITEA_URL" \
                     --repo "$REPO_FULL" \
                     --pr "$PR_NUMBER" \
@@ -221,7 +230,7 @@ pipeline {
                 export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE" 2>/dev/null || true)"
                 { set -x; } 2>/dev/null
                 if [ -n "${PR_NUMBER:-}" ] && [ -n "${GITEA_TOKEN:-}" ]; then
-                    python3 ci/review_post.py \
+                    "$UV" run --no-project python ci/review_post.py \
                         --gitea-url "$GITEA_URL" \
                         --repo "${REPO_FULL:-ying.yuxiang/sql-buddy}" \
                         --pr "$PR_NUMBER" \
