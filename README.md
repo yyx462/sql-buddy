@@ -95,7 +95,7 @@ can SSH into.
 > - bastion host: `192.0.2.10` (a public IP your ops team publishes)
 > - bastion ssh port: `22222` ← **not 22!** Many orgs run sshd on a high, non-standard
 >   port to dodge drive-by scanners. Always confirm with ops; assuming 22 will hang.
-> - ssh user: `ying.yuxiang` (companies usually issue one in `first.last` form,
+> - ssh user: `zhang.san` (companies usually issue one in `first.last` form,
 >   tied to your identity)
 > - private key: `~/.ssh/id_ed25519` (issued by your admin when they granted access;
 >   the *public* half is registered to your username on the bastion)
@@ -124,7 +124,7 @@ with many databases behind it.
 > ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
 >     -p 22222 -i ~/.ssh/id_ed25519 \
 >     -L 127.0.0.1:10021:10.0.0.21:9000 \
->     ying.yuxiang@192.0.2.10
+>     zhang.san@192.0.2.10
 > ```
 >
 > If this hangs at "Connecting to … port 22" *but you specified `-p 22222`* → sshd
@@ -327,7 +327,7 @@ value below. Ask the user explicitly, one at a time, in plain language.
    |--------------|-----------------------------------------------------------|------------------------------------------------|
    | `host`       | Public IP / hostname of the bastion                       | From their ops / infra team                     |
    | `port`       | SSH port the bastion listens on                           | From ops. **Do not assume 22** — many orgs run sshd on a high port like `22222`; assuming 22 will hang silently on `Connecting to host port 22` |
-   | `user`       | SSH login user, usually `first.last` form (e.g. `ying.yuxiang`) | The username IT registered for them        |
+   | `user`       | SSH login user, usually `first.last` form (e.g. `zhang.san`) | The username IT registered for them        |
    | `key`        | Absolute path to their **private** key file on this Mac   | Issued by their admin when access was granted. The matching *public* key is registered on the bastion under their username, so the private key + username are tied together |
    | keepalive    | (optional) `server_alive_interval` / `server_alive_count_max` | Defaults 30s / 3 are fine — only set if ops says so          |
 
@@ -339,11 +339,11 @@ value below. Ask the user explicitly, one at a time, in plain language.
    ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
        -p 22222 -i /Users/<them>/.ssh/id_ed25519 \
        -L 127.0.0.1:10021:10.0.0.21:9000 \
-       ying.yuxiang@192.0.2.10
+       zhang.san@192.0.2.10
    ```
 
    From that line you can read off `host=192.0.2.10`, `port=22222`,
-   `user=ying.yuxiang`, `key=/Users/<them>/.ssh/id_ed25519`. The `-L` line also gives
+   `user=zhang.san`, `key=/Users/<them>/.ssh/id_ed25519`. The `-L` line also gives
    you one database's `local_port:remote_host:remote_port` triple immediately.
 
 4. **For each database** the user wants to query, collect (in plain language, then
