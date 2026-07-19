@@ -36,9 +36,11 @@ You will need:
 1. **Python 3.11+** - `python3 --version`
 2. **[uv](https://docs.astral.sh/uv/)** (fast Python installer) - or plain `pip` works too.
 3. **SSH access** to a bastion/jump-host that can reach your databases:
-   - the bastion `user@host` and ssh `port`,
-   - a **private key file** on your machine (key-based auth only),
-   - for each database, the DB `host:port` **as seen from the bastion**.
+   - the bastion `user@host` and ssh `port` (ask your ops team — **don't assume 22**;
+     many orgs run sshd on a non-standard port like `22222`),
+   - a **private key file** on your machine (issued by your admin — key-based auth only),
+   - for each database, the DB `host:port` **as seen from the bastion** (private internal
+     IPs like `10.0.0.x`, not your laptop's view).
 4. **Read-only database credentials** - ask your DBA for a user that can `SELECT` but not write.
 5. An **MCP-compatible client** to connect it to (e.g. Claude Code).
 
@@ -79,12 +81,57 @@ If it prints no errors, the install worked. Stop it for now - we configure datab
 Most databases are **not exposed to the public internet** - they sit behind a firewall
 and are only reachable from inside the network. SQL Buddy reaches them by opening an
 **SSH tunnel** itself: a secure pipe that maps a **port on your laptop** to the
-**database port on the remote server**, through a bastion/jump-host you can SSH into.
+**database port on the remote server**, through a **bastion** (a.k.a. jump-host) you
+can SSH into.
+
+> **What is a "bastion"?** A bastion is a single public-facing server your company
+> exposes so you can SSH *into* the internal network. You log in to the bastion from
+> the internet; the bastion then has line-of-sight to private internal hosts (your
+> databases, internal services, etc.). Think of it as the only door into the walled
+> garden - everything else is firewalled off.
+>
+> **Concrete example (shapes only — replace with your own values):**
+>
+> - bastion host: `192.0.2.10` (a public IP your ops team publishes)
+> - bastion ssh port: `22222` ← **not 22!** Many orgs run sshd on a high, non-standard
+>   port to dodge drive-by scanners. Always confirm with ops; assuming 22 will hang.
+> - ssh user: `ying.yuxiang` (companies usually issue one in `first.last` form,
+>   tied to your identity)
+> - private key: `~/.ssh/id_ed25519` (issued by your admin when they granted access;
+>   the *public* half is registered to your username on the bastion)
+>
+> Then, *inside* the network the bastion can see, your databases live at private IPs:
+>
+> | DB label   | DBMS       | Bastion's view (`remote_host:remote_port`) | Pick a `local_port` on your Mac |
+> |------------|------------|---------------------------------------------|----------------------------------|
+> | `ck`       | ClickHouse | `10.0.0.21:9000`                         | `10021`                          |
+> | `mysql`    | MySQL      | `10.0.0.11:3306`                         | `10011`                          |
+>
+> The **local_port** is any free port between 1024 and 65535 on *your* laptop - pick
+> numbers you can remember and that nothing else on your machine is using. SQL Buddy
+> binds `127.0.0.1:local_port` and the DB driver connects there - it never knows SSH
+> is in the middle.
 
 You do **not** run a separate `ssh -N` terminal. SQL Buddy starts the tunnel lazily on
 the first query that needs it, keeps it alive for the life of the server, restarts it
 if it drops, and tears it down when the server exits. One bastion -> one tunnel, even
 with many databases behind it.
+
+> **Manual smoke test first** (recommended): confirm your bastion + key + port work
+> before writing `db.ini`. Equivalent to what SQL Buddy will run for you:
+>
+> ```bash
+> ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+>     -p 22222 -i ~/.ssh/id_ed25519 \
+>     -L 127.0.0.1:10021:10.0.0.21:9000 \
+>     ying.yuxiang@192.0.2.10
+> ```
+>
+> If this hangs at "Connecting to … port 22" *but you specified `-p 22222`* → sshd
+> isn't reachable on that port from your network (firewall, wrong port, ops changed
+> it). If it says `Permission denied (publickey)` → the key isn't accepted (wrong
+> user, key not registered, key file too open — `chmod 600 ~/.ssh/id_ed25519`).
+> If it works → Ctrl+C and let SQL Buddy manage it instead.
 
 You describe the tunnel in `db.ini` (next step) with:
 
@@ -93,13 +140,12 @@ You describe the tunnel in `db.ini` (next step) with:
   `remote_host` / `remote_port` (the DB as seen from the bastion) and `local_port`
   (the port SQL Buddy binds on localhost).
 
-The local port is **any free port** between 1024 and 65535 - pick numbers you can
-remember and that nothing else on your machine is using. The remote port must match
-the real database port (ClickHouse default **9000**, MySQL default **3306**).
+The remote port must match the real database port (ClickHouse default **9000**,
+MySQL default **3306**).
 
 > **First connection only:** SQL Buddy uses `StrictHostKeyChecking=accept-new`, so the
 > bastion's host key is auto-trusted on first run. If you prefer to vet it manually,
-> `ssh you@bastion` once first to add it to `~/.ssh/known_hosts`.
+> `ssh you@bastion -p <port>` once first to add it to `~/.ssh/known_hosts`.
 
 ---
 
@@ -255,31 +301,70 @@ connection"* - if it can answer, you're live. 🎉
 If you (the agent) are installing SQL Buddy on a user's machine, **do not guess** any
 value below. Ask the user explicitly, one at a time, in plain language.
 
+> **Drive the setup straight after `git clone`** — do not stall at "what next?". The
+> whole point is for the user to be querying databases 5 minutes after cloning. Once
+> step 1's `uv pip install -e .` returns, immediately proceed to steps 2-5 to
+> collect values and write `db.ini`. The only blocker between you and a finished
+> install is the user-supplied values in steps 2-4 — get to those questions now.
+
 > The `init.py` wizard is interactive (for humans). As an agent, **write `db.ini`
 > directly** with your file-editing tool instead of driving the wizard - it's faster
 > and avoids pasting secrets through a prompt.
 
 1. **The repository** - clone it, then `uv venv .venv --python 3.11 && uv pip install -e .`
-   inside it.
+   inside it. As soon as this returns, **move to step 2 — do not stop to ask "what
+   next?"**.
 2. **Ask the user which mode** they want:
    - **Auto** - sql-buddy opens the SSH tunnel itself. Continue to step 3.
    - **External** - the user already runs a tunnel/connection (e.g. `ssh -N` on Windows).
      Skip to step 4 (External branch).
-3. **Auto mode - SSH bastion** they reach their databases through. Collect:
-   - the bastion `host` and ssh `port` (often 22),
-   - the ssh `user`,
-   - the **path to their private key file** on this machine,
-   - (optional) keepalive settings (defaults of 30s/3 are fine).
-4. **For each database** the user wants to query, collect:
-   - A **connection name** (a short label, e.g. `ck`, `mysql`, `prod`). Use `_` or `-`.
-   - The **DBMS type**: `clickhouse` or `mysql`.
-   - **Auto mode:** the DB `host`/`port` as seen **from the bastion**
-     (`remote_host`/`remote_port`) - confirm with the user; this is not their laptop's
-     view - plus a free **`local_port`** on the laptop.
-   - **External mode:** the `host`/`port` to connect to (usually `localhost` + the local
-     tunnel port). No `tunnel`/`remote_*`/`local_port` keys.
-   - The **read-only database user** and **password**.
-   - The default **database** name (ClickHouse) - optional for MySQL.
+3. **Auto mode - SSH bastion** they reach their databases through. Many users have
+   never heard the word "bastion" — explain it in one line ("the public server your
+   company lets you SSH *into*, from which you can reach private internal hosts").
+   Collect:
+
+   | Field        | What it is                                                | Where the user finds it                        |
+   |--------------|-----------------------------------------------------------|------------------------------------------------|
+   | `host`       | Public IP / hostname of the bastion                       | From their ops / infra team                     |
+   | `port`       | SSH port the bastion listens on                           | From ops. **Do not assume 22** — many orgs run sshd on a high port like `22222`; assuming 22 will hang silently on `Connecting to host port 22` |
+   | `user`       | SSH login user, usually `first.last` form (e.g. `ying.yuxiang`) | The username IT registered for them        |
+   | `key`        | Absolute path to their **private** key file on this Mac   | Issued by their admin when access was granted. The matching *public* key is registered on the bastion under their username, so the private key + username are tied together |
+   | keepalive    | (optional) `server_alive_interval` / `server_alive_count_max` | Defaults 30s / 3 are fine — only set if ops says so          |
+
+   Ask the user to **paste the equivalent ssh command they would run manually**, if
+   they have one — that's the single most reliable way to extract host/port/user/key
+   without transposition errors:
+
+   ```
+   ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+       -p 22222 -i /Users/<them>/.ssh/id_ed25519 \
+       -L 127.0.0.1:10021:10.0.0.21:9000 \
+       ying.yuxiang@192.0.2.10
+   ```
+
+   From that line you can read off `host=192.0.2.10`, `port=22222`,
+   `user=ying.yuxiang`, `key=/Users/<them>/.ssh/id_ed25519`. The `-L` line also gives
+   you one database's `local_port:remote_host:remote_port` triple immediately.
+
+4. **For each database** the user wants to query, collect (in plain language, then
+   translate to `db.ini` keys):
+
+   | `db.ini` key     | Plain-language question                                                        | Example value            |
+   |------------------|--------------------------------------------------------------------------------|--------------------------|
+   | (section name)   | "What short label do you want for this connection?" (use `_` or `-`)           | `ck`, `mysql`, `prod`    |
+   | `type`           | "Is it ClickHouse or MySQL?"                                                   | `clickhouse` / `mysql`   |
+   | `remote_host`    | "From *on the bastion*, what IP/hostname is the DB at?" (NOT their laptop's)  | `10.0.0.21`           |
+   | `remote_port`    | "What port does the DB listen on there?" (CH default 9000, MySQL 3306)       | `9000`                   |
+   | `local_port`     | "Pick a free port on your Mac between 1024-65535" (offer to pick one for them)| `10021`                   |
+   | `user`           | "The read-only DB username (ask your DBA — must be SELECT-only)"             | `api_asia`                |
+   | `password`       | "That user's password"                                                         | *(don't echo it back)*   |
+   | `database`       | "Default database name?" (required for ClickHouse, optional for MySQL)        | `default` / `myapp`      |
+
+   - **Auto mode:** needs all of `remote_host` / `remote_port` / `local_port`. No
+     `host` / `port` keys on this connection (those are direct-only).
+   - **External mode:** the user already runs the tunnel — collect `host` (usually
+     `localhost`) and `port` (the local tunnel port). No `tunnel`/`remote_*`/`local_port`
+     keys.
 5. **Write `connections/config/db.ini`** (see `db.ini.example` for the shape):
    - Auto: one `[ssh:*]` section for the bastion + each connection with
      `tunnel = ssh:*` and its `remote_host`/`remote_port`/`local_port` (no `host`/`port`).
@@ -289,6 +374,13 @@ value below. Ask the user explicitly, one at a time, in plain language.
    `python -c "import db_query; print(db_query.check_connection_query('<conn>'))"`.
    Expect `{"status":"ok","latency_ms":...}`. On `status:'error'`, read the `hint` and
    follow it (in External mode an error usually means the user's tunnel is down).
+   **Common Auto-mode failures and fixes:**
+   - hangs at "Connecting to host port 22" but you specified another `-p` → sshd not
+     reachable on that port. Confirm the port with ops.
+   - `Permission denied (publickey)` → wrong user, key not registered on bastion, or
+     key file too permissive (`chmod 600 <key>` fixes the third one).
+   - tunnel comes up but DB call times out → wrong `remote_host`/`remote_port`
+     (those are the DB *as seen from the bastion*, not from the laptop).
 7. **Confirm `db.ini` is not tracked** by git (`git status` should not list it).
 8. **Register the MCP server** in the user's client config with absolute paths to their
    `.venv/bin/python` and `server.py`. **Confirm the venv exists first** — that
