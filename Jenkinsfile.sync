@@ -2,8 +2,8 @@
 //
 // Trigger: Gitea "pull request" webhook filtered to action=closed and
 // pull_request.merged=true. After a human clicks Merge in the Gitea UI,
-// this job fast-forwards the shared workspace (/data/www/algo_review) to
-// origin/master so the next SSH login finds a clean checkout — no more
+// this job fast-forwards the shared workspace (/data/www/algo/sql-buddy-review)
+// to origin/master so the next SSH login finds a clean checkout — no more
 // `git pull && git reset --hard` ritual on every login.
 //
 // Strictly read-only against the workspace: fetch + reset --hard + clean.
@@ -27,7 +27,7 @@ pipeline {
     agent {
         node {
             label 'web01'
-            customWorkspace '/data/www/algo_review'
+            customWorkspace '/data/www/algo/sql-buddy-sync'
         }
     }
 
@@ -39,9 +39,16 @@ pipeline {
     }
 
     environment {
-        GITEA_URL        = 'https://git.sh.nint.com'
-        MAINTAINER       = 'ying.yuxiang'
-        GITEA_TOKEN_FILE = '/data/www/algo-deps/gitea-token-review'
+        GITEA_URL         = 'https://git.sh.nint.com'
+        MAINTAINER        = 'ying.yuxiang'
+        GITEA_TOKEN_FILE  = '/data/www/algo/deps/gitea-token'
+        // The workspace this pipeline fast-forwards. NOT customWorkspace:
+        // the sync pipeline's own @tmp-parent dir is /data/www/algo/sql-buddy-sync;
+        // the operand (the review pipeline's checkout that humans SSH into)
+        // is a separate path. Sharing customWorkspace with the review pipeline
+        // would race concurrent review+sync builds, with sync's reset --hard /
+        // clean -fd wiping review's in-progress pr.diff / verdict.json.
+        REVIEW_WORKSPACE  = '/data/www/algo/sql-buddy-review'
     }
 
     triggers {
@@ -115,6 +122,12 @@ pipeline {
                 export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE")"
                 REPO_URL="https://x-access-token:${GITEA_TOKEN}@git.sh.nint.com/ying.yuxiang/sql-buddy.git"
                 { set -x; } 2>/dev/null
+
+                # Operate on the REVIEW_WORKSPACE, NOT the sync pipeline's own
+                # customWorkspace. The two Jenkins items have independent
+                # @tmp-parent dirs to avoid concurrent-build races.
+                cd "$REVIEW_WORKSPACE"
+
                 if [ ! -d .git ]; then
                     git clone "$REPO_URL" .
                 fi

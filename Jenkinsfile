@@ -35,7 +35,7 @@ pipeline {
     agent {
         node {
             label 'web01'
-            customWorkspace '/data/www/algo_review'
+            customWorkspace '/data/www/algo/sql-buddy-review'
         }
     }
 
@@ -49,7 +49,7 @@ pipeline {
     environment {
         GITEA_URL        = 'https://git.sh.nint.com'
         MAINTAINER       = 'ying.yuxiang'
-        GITEA_TOKEN_FILE = '/data/www/algo-deps/gitea-token-review'
+        GITEA_TOKEN_FILE = '/data/www/algo/deps/gitea-token'
         IMAGE            = 'sql-buddy-review'
         MINIMAX_MODEL    = 'MiniMax-M3'
         REVIEW_PROMPT    = 'Review pull request #$PR_NUMBER. The unified diff is at /workspace/pr.diff — read it first. Then explore the repository as needed to evaluate each change against the rubric in AGENTS.md. Follow the pr-review skill: classify each finding into tier 1 (blocking) or tier 2 (minor). Output ONLY a JSON object: {"summary": "...", "findings": [{"tier": 1, "path": "...", "line": 0, "message": "..."}]}. If there are no findings, output {"summary": "...", "findings": []}. Output nothing except the JSON.'
