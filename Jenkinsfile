@@ -79,40 +79,61 @@ pipeline {
 
         stage('Skip check') {
             steps {
-                // Manual Build Now (no PR payload) → clean skip, not an error.
-                // Real values arrive only from a PR webhook.
-                sh '''
-                set -e
-                if [ -z "${PR_NUMBER:-}" ]; then
-                    echo "manual build (no PR payload) -> skip"
-                    exit 0
-                fi
-                if [ "$AUTHOR" = "$MAINTAINER" ]; then
-                    echo "skip: PR authored by maintainer ($MAINTAINER)"
-                    exit 0
-                fi
-                if [ "$DRAFT" = "true" ]; then
-                    echo "skip: draft PR"
-                    exit 0
-                fi
-                # Check for skip-review label via Gitea API.
-                { set +x; } 2>/dev/null
-                export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE" 2>/dev/null || true)"
-                LABELS=$(curl -sf \
-                    -H "Authorization: token $GITEA_TOKEN" \
-                    "$GITEA_URL/api/v1/repos/$REPO_FULL/issues/$PR_NUMBER/labels" \
-                    2>/dev/null || echo '[]')
-                { set -x; } 2>/dev/null
-                if echo "$LABELS" | grep -q '"skip-review"'; then
-                    echo "skip: PR has skip-review label"
-                    exit 0
-                fi
-                echo "proceed: reviewing PR #$PR_NUMBER by $AUTHOR"
-                '''
+                // Decide whether to skip; if so, capture a reason string the
+                // downstream `when` conditions read. We do NOT use `exit 0`
+                // here — that returned 0 to Jenkins, which treated it as
+                // "this step succeeded" and continued to the next stage.
+                // On a manual Build Now (no $PR_NUMBER), the Checkout PR
+                // stage then ran with empty $HEAD_SHA and crashed.
+                //
+                // The shell below writes a skip-reason string to stdout
+                // when skipping, or empty stdout when proceeding. The
+                // pipeline reads it via `returnStdout: true` into
+                // env.SKIP_REASON, and downstream stages are gated on
+                // `!env.SKIP_REASON.trim()`.
+                script {
+                    env.SKIP_REASON = sh(
+                        returnStdout: true,
+                        script: '''
+                            set -e
+                            if [ -z "${PR_NUMBER:-}" ]; then
+                                echo "manual build (no PR payload)"
+                                exit 0
+                            fi
+                            if [ "$AUTHOR" = "$MAINTAINER" ]; then
+                                echo "PR authored by maintainer ($MAINTAINER)"
+                                exit 0
+                            fi
+                            if [ "$DRAFT" = "true" ]; then
+                                echo "draft PR"
+                                exit 0
+                            fi
+                            # Check for skip-review label via Gitea API.
+                            { set +x; } 2>/dev/null
+                            export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE" 2>/dev/null || true)"
+                            LABELS=$(curl -sf \
+                                -H "Authorization: token $GITEA_TOKEN" \
+                                "$GITEA_URL/api/v1/repos/$REPO_FULL/issues/$PR_NUMBER/labels" \
+                                2>/dev/null || echo '[]')
+                            { set -x; } 2>/dev/null
+                            if echo "$LABELS" | grep -q '"skip-review"'; then
+                                echo "PR has skip-review label"
+                                exit 0
+                            fi
+                            # Empty stdout — proceeds to review.
+                        '''
+                    ).trim()
+                    if (env.SKIP_REASON) {
+                        echo "skip: ${env.SKIP_REASON}"
+                    } else if (env.PR_NUMBER) {
+                        echo "proceed: reviewing PR #${env.PR_NUMBER} by ${env.AUTHOR}"
+                    }
+                }
             }
         }
 
         stage('Checkout PR') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
                 sh '''
                 set -e
@@ -134,6 +155,7 @@ pipeline {
         }
 
         stage('Review') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
                 // pi runs read-only (--tools read,grep,find,ls), non-interactive,
                 // with the repo mounted at /workspace. Only the LLM key enters
@@ -165,6 +187,7 @@ pipeline {
         }
 
         stage('Post review') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
                 sh '''
                 set +e

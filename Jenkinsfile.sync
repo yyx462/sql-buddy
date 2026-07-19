@@ -76,45 +76,59 @@ pipeline {
 
         stage('Skip check') {
             steps {
-                sh '''
-                set -e
-                if [ -z "${PR_NUMBER:-}" ]; then
-                    echo "manual build (no PR payload) -> skip"
-                    exit 0
-                fi
-                if [ "$MERGED" != "true" ]; then
-                    echo "skip: PR closed without merge"
-                    exit 0
-                fi
-                # NOTE: unlike the review pipeline, the sync pipeline does NOT
-                # skip on $AUTHOR == $MAINTAINER. The maintainer authors most
-                # PRs and merges them in the UI; the workspace should
-                # fast-forward to origin/master either way — otherwise the
-                # next SSH login hits the divergent-branches prompt. The review
-                # pipeline keeps the maintainer skip (self-review is sensible);
-                # the two pipelines deliberately differ on this rule.
-                if [ "$DRAFT" = "true" ]; then
-                    echo "skip: draft PR"
-                    exit 0
-                fi
-                # Check for skip-review label to match the review pipeline's contract.
-                { set +x; } 2>/dev/null
-                export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE" 2>/dev/null || true)"
-                LABELS=$(curl -sf \
-                    -H "Authorization: token $GITEA_TOKEN" \
-                    "$GITEA_URL/api/v1/repos/$REPO_FULL/issues/$PR_NUMBER/labels" \
-                    2>/dev/null || echo '[]')
-                { set -x; } 2>/dev/null
-                if echo "$LABELS" | grep -q '"skip-review"'; then
-                    echo "skip: PR has skip-review label"
-                    exit 0
-                fi
-                echo "proceed: syncing workspace after merge of PR #$PR_NUMBER by $AUTHOR"
-                '''
+                // See Jenkinsfile's Skip check for the design rationale:
+                // exit 0 from a shell step does NOT halt the pipeline; we
+                // capture the skip reason into env.SKIP_REASON and gate
+                // the downstream stage with a `when` condition.
+                script {
+                    env.SKIP_REASON = sh(
+                        returnStdout: true,
+                        script: '''
+                            set -e
+                            if [ -z "${PR_NUMBER:-}" ]; then
+                                echo "manual build (no PR payload)"
+                                exit 0
+                            fi
+                            if [ "$MERGED" != "true" ]; then
+                                echo "PR closed without merge"
+                                exit 0
+                            fi
+                            # NOTE: unlike the review pipeline, the sync pipeline does NOT
+                            # skip on $AUTHOR == $MAINTAINER. The maintainer authors most
+                            # PRs and merges them in the UI; the workspace should
+                            # fast-forward to origin/master either way — otherwise the
+                            # next SSH login hits the divergent-branches prompt. The review
+                            # pipeline keeps the maintainer skip (self-review is sensible);
+                            # the two pipelines deliberately differ on this rule.
+                            if [ "$DRAFT" = "true" ]; then
+                                echo "draft PR"
+                                exit 0
+                            fi
+                            { set +x; } 2>/dev/null
+                            export GITEA_TOKEN="$(cat "$GITEA_TOKEN_FILE" 2>/dev/null || true)"
+                            LABELS=$(curl -sf \
+                                -H "Authorization: token $GITEA_TOKEN" \
+                                "$GITEA_URL/api/v1/repos/$REPO_FULL/issues/$PR_NUMBER/labels" \
+                                2>/dev/null || echo '[]')
+                            { set -x; } 2>/dev/null
+                            if echo "$LABELS" | grep -q '"skip-review"'; then
+                                echo "PR has skip-review label"
+                                exit 0
+                            fi
+                            # Empty stdout — proceeds to sync.
+                        '''
+                    ).trim()
+                    if (env.SKIP_REASON) {
+                        echo "skip: ${env.SKIP_REASON}"
+                    } else if (env.PR_NUMBER) {
+                        echo "proceed: syncing workspace after merge of PR #${env.PR_NUMBER} by ${env.AUTHOR}"
+                    }
+                }
             }
         }
 
         stage('Sync workspace') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
                 sh '''
                 set -e
