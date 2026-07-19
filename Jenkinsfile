@@ -100,10 +100,15 @@ pipeline {
                                 echo "manual build (no PR payload)"
                                 exit 0
                             fi
-                            if [ "$AUTHOR" = "$MAINTAINER" ]; then
-                                echo "PR authored by maintainer ($MAINTAINER)"
-                                exit 0
-                            fi
+                            # TEMPORARY: maintainer-skip disabled so the
+                            # review pipeline runs on the maintainer's own
+                            # PRs too. This is to live-smoke-test the review
+                            # pipeline end-to-end without a coworker PR.
+                            # Restore this block once smoke is complete:
+                            #   if [ "$AUTHOR" = "$MAINTAINER" ]; then
+                            #       echo "PR authored by maintainer ($MAINTAINER)"
+                            #       exit 0
+                            #   fi
                             if [ "$DRAFT" = "true" ]; then
                                 echo "draft PR"
                                 exit 0
