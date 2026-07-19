@@ -7,12 +7,14 @@
 // to the PR via the Gitea API.
 //
 // Secrets (never in the repo):
-//   - Gitea token  : a FILE on the web01 node ($GITEA_TOKEN_FILE), scoped to
+//   - Gitea token   : a FILE on the web01 node ($GITEA_TOKEN_FILE), scoped to
 //     comment + label only (NO push). Same file-on-disk pattern as the
 //     algo-task-deploy job. Read into $GITEA_TOKEN at runtime.
-//   - LLM API key  : a Jenkins Secret-text credential ('minimax-auth-token'),
-//     injected as $MINIMAX_API_KEY into the pi container only.
-//     The MiniMax base URL ($MINIMAX_BASE_URL) is non-secret, hardcoded below.
+//   - LLM API key   : a Jenkins Secret-text credential ('minimax-auth-token'),
+//     injected as $MINIMAX_CN_API_KEY into the pi container only.
+//     We use pi's built-in 'minimax-cn' provider, whose base URL is hardcoded
+//     to https://api.minimaxi.com/anthropic inside pi — no env override needed
+//     (and none is honored: pi ignores MINIMAX_BASE_URL for the minimax/providers).
 //
 // One-time job setup (UI):
 //   1. "Generic Webhook Trigger" plugin (already installed for algo-task-deploy).
@@ -50,7 +52,6 @@ pipeline {
         GITEA_TOKEN_FILE = '/data/www/algo-deps/gitea-token-review'
         IMAGE            = 'sql-buddy-review'
         MINIMAX_MODEL    = 'MiniMax-M3'
-        MINIMAX_BASE_URL = 'https://api.minimaxi.com/anthropic'
         REVIEW_PROMPT    = 'Review pull request #$PR_NUMBER. The unified diff is at /workspace/pr.diff — read it first. Then explore the repository as needed to evaluate each change against the rubric in AGENTS.md. Follow the pr-review skill: classify each finding into tier 1 (blocking) or tier 2 (minor). Output ONLY a JSON object: {"summary": "...", "findings": [{"tier": 1, "path": "...", "line": 0, "message": "..."}]}. If there are no findings, output {"summary": "...", "findings": []}. Output nothing except the JSON.'
     }
 
@@ -142,11 +143,10 @@ pipeline {
                     set -e
                     docker run --rm \
                         -v "$WORKSPACE:/workspace" \
-                        -e MINIMAX_API_KEY="$MINIMAX_KEY" \
-                        -e MINIMAX_BASE_URL="$MINIMAX_BASE_URL" \
+                        -e MINIMAX_CN_API_KEY="$MINIMAX_KEY" \
                         -e PI_OFFLINE=1 \
                         "$IMAGE" \
-                        --provider minimax \
+                        --provider minimax-cn \
                         --model "$MINIMAX_MODEL" \
                         --tools read,grep,find,ls \
                         --no-session \
