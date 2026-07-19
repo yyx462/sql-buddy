@@ -257,6 +257,8 @@ class TunnelManager:
             if stream is None:
                 return
             for line in iter(stream.readline, ''):
+                if isinstance(line, bytes):
+                    line = line.decode('utf-8', errors='replace')
                 with self._lock:
                     tail = self._stderr_tail.setdefault(block, [])
                     tail.append(line.rstrip())
