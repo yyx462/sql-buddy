@@ -65,6 +65,10 @@ pipeline {
         MINIMAX_KEY_FILE      = '/data/www/algo/deps/minimax-key'
         IMAGE                 = 'sql-buddy-review'
         MINIMAX_MODEL         = 'MiniMax-M3'
+        // Docker CLI lives at /usr/bin/docker but the Jenkins agent's default
+        // sh PATH excludes /usr/bin (same gotcha as python3 — see $UV above).
+        // Use the absolute path so docker is always found.
+        DOCKER                = '/usr/bin/docker'
         // Python interpreter lives in the shared uv-managed install (mirrors
         // amazon_alg's Jenkinsfile). The agent's default sh PATH doesn't
         // include /usr/bin/python3, so we go through uv to find python.
@@ -207,9 +211,9 @@ pipeline {
                 // problem). One tag, one image, zero accumulation.
                 sh '''
                 set -e
-                docker build -t "$IMAGE" -f Dockerfile .
-                docker image prune -f 2>/dev/null || true
-                docker image inspect "$IMAGE" --format 'image ready: {{.Id}}'
+                "$DOCKER" build -t "$IMAGE" -f Dockerfile .
+                "$DOCKER" image prune -f 2>/dev/null || true
+                "$DOCKER" image inspect "$IMAGE" --format 'image ready: {{.Id}}'
                 '''
             }
         }
@@ -235,12 +239,15 @@ pipeline {
                 { set +x; } 2>/dev/null
                 export MINIMAX_CN_API_KEY="$(cat "$MINIMAX_KEY_FILE")"
                 { set -x; } 2>/dev/null
+                # "$DOCKER run" (not bare `docker`) — same /usr/bin PATH fix as
+                # the build stage above.
+                #
                 # --rm is MANDATORY: auto-removes the container + its writable
                 # overlay layer when pi exits. Without it every review leaves a
                 # stopped container, and hundreds of reviews = hundreds of dead
                 # overlays eating disk. Never remove --rm. See Ensure image
                 # stage for the matching image-lifecycle guarantee.
-                docker run --rm \
+                "$DOCKER" run --rm \
                     -v "$WORKSPACE:/workspace" \
                     --env MINIMAX_CN_API_KEY \
                     -e PI_OFFLINE=1 \
