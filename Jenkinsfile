@@ -177,14 +177,22 @@ pipeline {
                 // the container; the Gitea token does NOT. The key is read from
                 // a file on web01 (same pattern as $GITEA_TOKEN_FILE, and as
                 // amazon_alg) — see docs/adr/0001-*.md for the security rationale.
+                //
+                // SECRET-LEAK GUARD: do NOT pass the key as `-e NAME=<value>` —
+                // Jenkins sh tracing (set -x) would echo the literal value into
+                // the build log. Instead export under set +x and use `--env NAME`
+                // (no =value) so docker inherits it from the environment; the
+                // traced docker CLI then shows only the variable NAME. This is
+                // the only safe shape once we left withCredentials (which masked
+                // automatically) for the file-on-disk pattern.
                 sh '''
                 set -e
                 { set +x; } 2>/dev/null
-                export MINIMAX_KEY="$(cat "$MINIMAX_KEY_FILE")"
+                export MINIMAX_CN_API_KEY="$(cat "$MINIMAX_KEY_FILE")"
                 { set -x; } 2>/dev/null
                 docker run --rm \
                     -v "$WORKSPACE:/workspace" \
-                    -e MINIMAX_CN_API_KEY="$MINIMAX_KEY" \
+                    --env MINIMAX_CN_API_KEY \
                     -e PI_OFFLINE=1 \
                     "$IMAGE" \
                     --provider minimax-cn \
