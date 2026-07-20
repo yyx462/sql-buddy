@@ -1,10 +1,19 @@
-// sql-buddy review pipeline — Jenkins job "sql-buddy-review" (cicd.nint.hk)
+// sql-buddy review + sync pipeline — Jenkins job "sql-buddy-review" (cicd.nint.hk)
 //
 // Trigger: a Gitea "pull request" webhook hits the Generic Webhook Trigger
-// plugin, filtered to opened / reopened / synchronized / ready_for_review PRs.
-// The Review agent (pi) reads the diff + repo and emits a JSON verdict; this
-// pipeline derives the label, renders a bannered comment, and posts both
-// to the PR via the Gitea API.
+// plugin, filtered to opened / reopened / synchronized / ready_for_review /
+// closed PRs. On the first four, the Review agent (pi) reads the diff + repo
+// and emits a JSON verdict; this pipeline derives the label, renders a bannered
+// comment, and posts both to the PR via the Gitea API. On `closed`+`merged`,
+// review is skipped but the workspace is still synced (see post-merge sync
+// below).
+//
+// Post-merge sync: the `post { always }` block fast-forwards $WORKSPACE to
+// origin/master after EVERY trigger (review, skip, merge, or failure). This
+// replaces the former sql-buddy-sync pipeline (Jenkinsfile.sync) — one
+// pipeline, one workspace, no duplicate /data/www/algo/sql-buddy-sync folder.
+// To migrate: delete the sql-buddy-sync Jenkins job + its webhook; this file
+// is the single source of truth.
 //
 // Secrets (never in the repo) — both live as FILES on the web01 node, mirroring
 // the amazon_alg Jenkinsfile doctrine: keep secrets out of the repo AND out of
@@ -73,13 +82,14 @@ pipeline {
                 [key: 'ACTION',    value: '$.action'],
                 [key: 'PR_NUMBER', value: '$.number'],
                 [key: 'DRAFT',     value: '$.pull_request.draft'],
+                [key: 'MERGED',    value: '$.pull_request.merged'],
                 [key: 'AUTHOR',    value: '$.pull_request.user.login'],
                 [key: 'HEAD_SHA',  value: '$.pull_request.head.sha'],
                 [key: 'BASE_SHA',  value: '$.pull_request.base.sha'],
                 [key: 'REPO_FULL', value: '$.repository.full_name'],
             ],
             regexpFilterText: '$ACTION',
-            regexpFilterExpression: '^(opened|reopened|synchronized|ready_for_review)$',
+            regexpFilterExpression: '^(opened|reopened|synchronized|ready_for_review|closed)$',
             printContributedVariables: false,
             printPostContent: false,
         )
@@ -108,6 +118,19 @@ pipeline {
                             set -e
                             if [ -z "${PR_NUMBER:-}" ]; then
                                 echo "manual build (no PR payload)"
+                                exit 0
+                            fi
+                            # closed action = a PR was merged (or closed without
+                            # merge). Either way there's nothing to review — the
+                            # stages below are skipped via the returned reason.
+                            # The post { always } sync still runs, so a merge
+                            # fast-forwards the workspace to the new master.
+                            if [ "$ACTION" = "closed" ]; then
+                                if [ "$MERGED" = "true" ]; then
+                                    echo "PR merged, sync only (review skipped)"
+                                else
+                                    echo "PR closed without merge"
+                                fi
                                 exit 0
                             fi
                             # TEMPORARY: maintainer-skip disabled so the
@@ -169,6 +192,28 @@ pipeline {
             }
         }
 
+        stage('Ensure image') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
+            steps {
+                // Build the review-agent image so `docker run` never exits 127
+                // (image-missing). The Dockerfile lives in the repo at the PR
+                // HEAD checked out above, so a PR that bumps pi / changes the
+                // image gets reviewed against its OWN image. Docker layer
+                // caching makes a no-change rebuild ~2s (all layers hit cache).
+                //
+                // `docker image prune -f` after the build drops the dangling
+                // <none> layer left when the tag moves — prevents the slow disk
+                // creep from repeated rebuilds (the overlay-proliferation
+                // problem). One tag, one image, zero accumulation.
+                sh '''
+                set -e
+                docker build -t "$IMAGE" -f Dockerfile .
+                docker image prune -f 2>/dev/null || true
+                docker image inspect "$IMAGE" --format 'image ready: {{.Id}}'
+                '''
+            }
+        }
+
         stage('Review') {
             when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
@@ -190,6 +235,11 @@ pipeline {
                 { set +x; } 2>/dev/null
                 export MINIMAX_CN_API_KEY="$(cat "$MINIMAX_KEY_FILE")"
                 { set -x; } 2>/dev/null
+                # --rm is MANDATORY: auto-removes the container + its writable
+                # overlay layer when pi exits. Without it every review leaves a
+                # stopped container, and hundreds of reviews = hundreds of dead
+                # overlays eating disk. Never remove --rm. See Ensure image
+                # stage for the matching image-lifecycle guarantee.
                 docker run --rm \
                     -v "$WORKSPACE:/workspace" \
                     --env MINIMAX_CN_API_KEY \
@@ -236,6 +286,34 @@ pipeline {
     }
 
     post {
+        always {
+            // Fast-forward $WORKSPACE to origin/master after EVERY trigger —
+            // review, skip, merge, or failure. Replaces the former
+            // sql-buddy-sync pipeline: one pipeline, one workspace, no
+            // duplicate /data/www/algo/sql-buddy-sync folder. Best-effort: a
+            // sync failure must NOT mask the real build result.
+            //
+            // Retry the fetch because Gitea's merge commit may not be
+            // replicated to all backends the instant the webhook fires.
+            sh '''
+                set +e
+                cd "$WORKSPACE" 2>/dev/null || exit 0
+                [ -d .git ] || exit 0
+                git fetch origin master 2>/tmp/sqlbuddy-sync.err || {
+                    echo "sync: fetch failed, retrying in 5s"
+                    sleep 5
+                    git fetch origin master 2>>/tmp/sqlbuddy-sync.err || {
+                        echo "sync: fetch failed after retry (non-fatal):"
+                        cat /tmp/sqlbuddy-sync.err
+                        exit 0
+                    }
+                }
+                git checkout -B master origin/master 2>/dev/null
+                git reset --hard origin/master 2>/dev/null
+                git clean -fd 2>/dev/null
+                echo "sync: workspace at $(git log --oneline -1)"
+            '''
+        }
         failure {
             // Something blew up (timeout, container crash, bad JSON, API error).
             // Post a review-error fallback so the PR isn't left silent.
