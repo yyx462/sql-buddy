@@ -65,10 +65,15 @@ pipeline {
         MINIMAX_KEY_FILE      = '/data/www/algo/deps/minimax-key'
         IMAGE                 = 'sql-buddy-review'
         MINIMAX_MODEL         = 'MiniMax-M3'
-        // Docker CLI lives at /usr/bin/docker but the Jenkins agent's default
-        // sh PATH excludes /usr/bin (same gotcha as python3 — see $UV above).
-        // Use the absolute path so docker is always found.
-        DOCKER                = '/usr/bin/docker'
+        // Docker CLI as a STATIC binary on the shared /data/www volume — same
+        // pattern as $UV. The Jenkins agent is a container
+        // (jenkins/inbound-agent:jdk21) that does NOT have docker installed
+        // inside it, and its /usr/bin is its own minimal tree, not the host's.
+        // The host's /data/www is bind-mounted into the agent at the same path,
+        // and /run/docker.sock is mounted at /var/run/docker.sock, so a static
+        // CLI here can reach the host daemon. Static = no glibc/musl dependency,
+        // works regardless of the agent's base image.
+        DOCKER                = '/data/www/algo/deps/docker'
         // Python interpreter lives in the shared uv-managed install (mirrors
         // amazon_alg's Jenkinsfile). The agent's default sh PATH doesn't
         // include /usr/bin/python3, so we go through uv to find python.
