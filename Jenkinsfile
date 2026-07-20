@@ -65,10 +65,15 @@ pipeline {
         MINIMAX_KEY_FILE      = '/data/www/algo/deps/minimax-key'
         IMAGE                 = 'sql-buddy-review'
         MINIMAX_MODEL         = 'MiniMax-M3'
-        // Docker CLI lives at /usr/bin/docker but the Jenkins agent's default
-        // sh PATH excludes /usr/bin (same gotcha as python3 — see $UV above).
-        // Use the absolute path so docker is always found.
-        DOCKER                = '/usr/bin/docker'
+        // Docker CLI as a STATIC binary on the shared /data/www volume — same
+        // pattern as $UV. The Jenkins agent is a container
+        // (jenkins/inbound-agent:jdk21) that does NOT have docker installed
+        // inside it, and its /usr/bin is its own minimal tree, not the host's.
+        // The host's /data/www is bind-mounted into the agent at the same path,
+        // and /run/docker.sock is mounted at /var/run/docker.sock, so a static
+        // CLI here can reach the host daemon. Static = no glibc/musl dependency,
+        // works regardless of the agent's base image.
+        DOCKER                = '/data/www/algo/deps/docker'
         // Python interpreter lives in the shared uv-managed install (mirrors
         // amazon_alg's Jenkinsfile). The agent's default sh PATH doesn't
         // include /usr/bin/python3, so we go through uv to find python.
@@ -209,8 +214,21 @@ pipeline {
                 // <none> layer left when the tag moves — prevents the slow disk
                 // creep from repeated rebuilds (the overlay-proliferation
                 // problem). One tag, one image, zero accumulation.
+                //
+                // Verify the bootstrap binary first (mirrors amazon_alg's
+                // `[ -x "$UV" ] || exit 127` guard) so a missing docker fails
+                // with a clear message instead of a cryptic "not found".
                 sh '''
                 set -e
+                [ -x "$DOCKER" ] || {
+                    echo "ERROR: docker CLI missing at $DOCKER"
+                    echo "Install the static binary:"
+                    echo "  curl -LO https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz"
+                    echo "  tar xzf docker-27.5.1.tgz docker/docker"
+                    echo "  install -m 755 -o sea -g users docker/docker $DOCKER"
+                    exit 127
+                }
+                "$DOCKER" version --format 'docker {{.Client.Version}} (server {{.Server.Version}})'
                 "$DOCKER" build -t "$IMAGE" -f Dockerfile .
                 "$DOCKER" image prune -f 2>/dev/null || true
                 "$DOCKER" image inspect "$IMAGE" --format 'image ready: {{.Id}}'
