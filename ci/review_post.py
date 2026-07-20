@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -197,7 +198,18 @@ def main() -> int:
 
     try:
         with open(args.verdict_file) as f:
-            verdict = json.load(f)
+            raw = f.read()
+        # Pi sometimes emits reasoning prose (or markdown fences) around the
+        # JSON despite the "output ONLY JSON" prompt — especially with
+        # --thinking medium. Try a direct parse first (fast path for clean
+        # output), then fall back to extracting the outermost {...} block.
+        try:
+            verdict = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if not match:
+                raise
+            verdict = json.loads(match.group())
     except (OSError, json.JSONDecodeError) as e:
         print(f"Could not parse verdict JSON: {e}", file=sys.stderr)
         body = (
