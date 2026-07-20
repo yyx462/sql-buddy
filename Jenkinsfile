@@ -214,8 +214,21 @@ pipeline {
                 // <none> layer left when the tag moves — prevents the slow disk
                 // creep from repeated rebuilds (the overlay-proliferation
                 // problem). One tag, one image, zero accumulation.
+                //
+                // Verify the bootstrap binary first (mirrors amazon_alg's
+                // `[ -x "$UV" ] || exit 127` guard) so a missing docker fails
+                // with a clear message instead of a cryptic "not found".
                 sh '''
                 set -e
+                [ -x "$DOCKER" ] || {
+                    echo "ERROR: docker CLI missing at $DOCKER"
+                    echo "Install the static binary:"
+                    echo "  curl -LO https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz"
+                    echo "  tar xzf docker-27.5.1.tgz docker/docker"
+                    echo "  install -m 755 -o sea -g users docker/docker $DOCKER"
+                    exit 127
+                }
+                "$DOCKER" version --format 'docker {{.Client.Version}} (server {{.Server.Version}})'
                 "$DOCKER" build -t "$IMAGE" -f Dockerfile .
                 "$DOCKER" image prune -f 2>/dev/null || true
                 "$DOCKER" image inspect "$IMAGE" --format 'image ready: {{.Id}}'
