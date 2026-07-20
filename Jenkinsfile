@@ -6,11 +6,13 @@
 // pipeline derives the label, renders a bannered comment, and posts both
 // to the PR via the Gitea API.
 //
-// Secrets (never in the repo):
-//   - Gitea token   : a FILE on the web01 node ($GITEA_TOKEN_FILE), scoped to
-//     comment + label only (NO push). Same file-on-disk pattern as the
-//     algo-task-deploy job. Read into $GITEA_TOKEN at runtime.
-//   - LLM API key   : a Jenkins Secret-text credential ('minimax-auth-token'),
+// Secrets (never in the repo) — both live as FILES on the web01 node, mirroring
+// the amazon_alg Jenkinsfile doctrine: keep secrets out of the repo AND out of
+// the Jenkins cred store (the system cred store needs Administer rights, which
+// the maintainer doesn't have).
+//   - Gitea token   : $GITEA_TOKEN_FILE, scoped to comment + label only (NO
+//     push). Read into $GITEA_TOKEN at runtime.
+//   - LLM API key   : $MINIMAX_KEY_FILE, read into $MINIMAX_KEY at runtime and
 //     injected as $MINIMAX_CN_API_KEY into the pi container only.
 //     We use pi's built-in 'minimax-cn' provider, whose base URL is hardcoded
 //     to https://api.minimaxi.com/anthropic inside pi — no env override needed
@@ -29,7 +31,8 @@
 //   5. Create Gitea labels: agent:approved, needs-work, good-attempt,
 //      skip-review, review-error.
 //   6. Put the scoped Gitea token at $GITEA_TOKEN_FILE on web01 (chmod 600).
-//   7. Add the Jenkins credential 'minimax-auth-token' (Secret text) with the MiniMax API key.
+//   7. Put the MiniMax API key at $MINIMAX_KEY_FILE on web01 (chmod 600, owned
+//      by the same user as $GITEA_TOKEN_FILE).
 
 pipeline {
     agent {
@@ -50,6 +53,7 @@ pipeline {
         GITEA_URL             = 'https://git.sh.nint.com'
         MAINTAINER            = 'ying.yuxiang'
         GITEA_TOKEN_FILE      = '/data/www/algo/deps/gitea-token'
+        MINIMAX_KEY_FILE      = '/data/www/algo/deps/minimax-key'
         IMAGE                 = 'sql-buddy-review'
         MINIMAX_MODEL         = 'MiniMax-M3'
         // Python interpreter lives in the shared uv-managed install (mirrors
@@ -170,30 +174,33 @@ pipeline {
             steps {
                 // pi runs read-only (--tools read,grep,find,ls), non-interactive,
                 // with the repo mounted at /workspace. Only the LLM key enters
-                // the container; the Gitea token does NOT.
-                withCredentials([string(credentialsId: 'minimax-auth-token', variable: 'MINIMAX_KEY')]) {
-                    sh '''
-                    set -e
-                    docker run --rm \
-                        -v "$WORKSPACE:/workspace" \
-                        -e MINIMAX_CN_API_KEY="$MINIMAX_KEY" \
-                        -e PI_OFFLINE=1 \
-                        "$IMAGE" \
-                        --provider minimax-cn \
-                        --model "$MINIMAX_MODEL" \
-                        --tools read,grep,find,ls \
-                        --no-session \
-                        --thinking medium \
-                        -a \
-                        -p "$REVIEW_PROMPT" \
-                        > verdict.json 2>pi-stderr.log
-                    echo "=== pi output ==="
-                    head -c 2000 verdict.json
-                    echo
-                    echo "=== pi stderr (last 20 lines) ==="
-                    tail -20 pi-stderr.log || true
-                    '''
-                }
+                // the container; the Gitea token does NOT. The key is read from
+                // a file on web01 (same pattern as $GITEA_TOKEN_FILE, and as
+                // amazon_alg) — see docs/adr/0001-*.md for the security rationale.
+                sh '''
+                set -e
+                { set +x; } 2>/dev/null
+                export MINIMAX_KEY="$(cat "$MINIMAX_KEY_FILE")"
+                { set -x; } 2>/dev/null
+                docker run --rm \
+                    -v "$WORKSPACE:/workspace" \
+                    -e MINIMAX_CN_API_KEY="$MINIMAX_KEY" \
+                    -e PI_OFFLINE=1 \
+                    "$IMAGE" \
+                    --provider minimax-cn \
+                    --model "$MINIMAX_MODEL" \
+                    --tools read,grep,find,ls \
+                    --no-session \
+                    --thinking medium \
+                    -a \
+                    -p "$REVIEW_PROMPT" \
+                    > verdict.json 2>pi-stderr.log
+                echo "=== pi output ==="
+                head -c 2000 verdict.json
+                echo
+                echo "=== pi stderr (last 20 lines) ==="
+                tail -20 pi-stderr.log || true
+                '''
             }
         }
 
