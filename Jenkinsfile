@@ -192,6 +192,28 @@ pipeline {
             }
         }
 
+        stage('Ensure image') {
+            when { expression { return !env.SKIP_REASON?.trim() } }
+            steps {
+                // Build the review-agent image so `docker run` never exits 127
+                // (image-missing). The Dockerfile lives in the repo at the PR
+                // HEAD checked out above, so a PR that bumps pi / changes the
+                // image gets reviewed against its OWN image. Docker layer
+                // caching makes a no-change rebuild ~2s (all layers hit cache).
+                //
+                // `docker image prune -f` after the build drops the dangling
+                // <none> layer left when the tag moves — prevents the slow disk
+                // creep from repeated rebuilds (the overlay-proliferation
+                // problem). One tag, one image, zero accumulation.
+                sh '''
+                set -e
+                docker build -t "$IMAGE" -f Dockerfile .
+                docker image prune -f 2>/dev/null || true
+                docker image inspect "$IMAGE" --format 'image ready: {{.Id}}'
+                '''
+            }
+        }
+
         stage('Review') {
             when { expression { return !env.SKIP_REASON?.trim() } }
             steps {
@@ -213,6 +235,11 @@ pipeline {
                 { set +x; } 2>/dev/null
                 export MINIMAX_CN_API_KEY="$(cat "$MINIMAX_KEY_FILE")"
                 { set -x; } 2>/dev/null
+                # --rm is MANDATORY: auto-removes the container + its writable
+                # overlay layer when pi exits. Without it every review leaves a
+                # stopped container, and hundreds of reviews = hundreds of dead
+                # overlays eating disk. Never remove --rm. See Ensure image
+                # stage for the matching image-lifecycle guarantee.
                 docker run --rm \
                     -v "$WORKSPACE:/workspace" \
                     --env MINIMAX_CN_API_KEY \
