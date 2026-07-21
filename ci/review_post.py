@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import urllib.error
 import urllib.parse
@@ -202,14 +201,35 @@ def main() -> int:
         # Pi sometimes emits reasoning prose (or markdown fences) around the
         # JSON despite the "output ONLY JSON" prompt — especially with
         # --thinking medium. Try a direct parse first (fast path for clean
-        # output), then fall back to extracting the outermost {...} block.
+        # output), then scan for a valid verdict using JSONDecoder.raw_decode.
+        #
+        # We do NOT use a greedy regex like re.search(r'\{.*\}', ...) — that
+        # matches from the first '{' to the last '}', so an example JSON
+        # object in pi's reasoning prose would swallow the real verdict and
+        # produce invalid combined JSON. raw_decode correctly handles nested
+        # braces and stops at the end of the first valid JSON value; combined
+        # with shape validation (must have 'summary' + 'findings'), this
+        # skips example fragments and finds the actual verdict.
         try:
             verdict = json.loads(raw)
         except json.JSONDecodeError:
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if not match:
-                raise
-            verdict = json.loads(match.group())
+            decoder = json.JSONDecoder()
+            verdict = None
+            for i, ch in enumerate(raw):
+                if ch != '{':
+                    continue
+                try:
+                    candidate, _ = decoder.raw_decode(raw[i:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate, dict) \
+                        and 'summary' in candidate \
+                        and 'findings' in candidate:
+                    verdict = candidate
+                    break
+            if verdict is None:
+                raise json.JSONDecodeError(
+                    "no valid verdict object found in output", raw, 0)
     except (OSError, json.JSONDecodeError) as e:
         print(f"Could not parse verdict JSON: {e}", file=sys.stderr)
         body = (
