@@ -207,12 +207,33 @@ def main() -> int:
         # matches from the first '{' to the last '}', so an example JSON
         # object in pi's reasoning prose would swallow the real verdict and
         # produce invalid combined JSON. raw_decode correctly handles nested
-        # braces and stops at the end of the first valid JSON value; combined
-        # with shape validation (must have 'summary' + 'findings'), this
-        # skips example fragments and finds the actual verdict.
+        # braces and stops at the end of the first valid JSON value.
+        #
+        # If multiple valid verdict-shaped objects appear (e.g. pi echoes the
+        # prompt's example verdict in its reasoning before emitting the real
+        # one), take the LAST — the actual verdict comes at the end, after
+        # any reasoning/examples.
+        #
+        # Schema validation is required because downstream code
+        # (render_comment, derive_label) calls .strip() on summary and .get()
+        # on each finding — type mismatches would crash outside this handler.
+        def _is_valid_verdict(cand):
+            if not isinstance(cand, dict):
+                return False
+            if not isinstance(cand.get("summary", ""), str):
+                return False
+            findings = cand.get("findings", [])
+            if not isinstance(findings, list):
+                return False
+            return all(isinstance(f, dict) for f in findings)
+
         try:
             verdict = json.loads(raw)
         except json.JSONDecodeError:
+            verdict = None
+        # Clean parse with wrong schema (e.g. findings is a string) is just
+        # as unusable as no parse — fall through to the scan in both cases.
+        if not _is_valid_verdict(verdict):
             decoder = json.JSONDecoder()
             verdict = None
             for i, ch in enumerate(raw):
@@ -222,11 +243,8 @@ def main() -> int:
                     candidate, _ = decoder.raw_decode(raw[i:])
                 except json.JSONDecodeError:
                     continue
-                if isinstance(candidate, dict) \
-                        and 'summary' in candidate \
-                        and 'findings' in candidate:
-                    verdict = candidate
-                    break
+                if _is_valid_verdict(candidate):
+                    verdict = candidate  # keep scanning — last valid wins
             if verdict is None:
                 raise json.JSONDecodeError(
                     "no valid verdict object found in output", raw, 0)
