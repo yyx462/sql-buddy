@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db_query import (
     CONFIG_FILE,
     check_connection_query,
+    clean_db_error,
     execute_limit_query,
     explain_query,
     find_table_query,
@@ -94,7 +95,7 @@ def _hint_for(exc, connection: str | None = None) -> dict:
 
 
 def _error_json(exc, connection: str | None = None) -> str:
-    payload = {"error": str(exc)}
+    payload = {"error": clean_db_error(str(exc))}
     if connection:
         payload["connection"] = connection
     payload.update(_hint_for(exc, connection))
@@ -164,7 +165,7 @@ def check_connection(connection: str = DEFAULT_CONNECTION) -> str:
     try:
         return check_connection_query(connection)
     except Exception as e:
-        payload = {"connection": connection, "status": "error", "error": str(e)}
+        payload = {"connection": connection, "status": "error", "error": clean_db_error(str(e))}
         payload.update(_hint_for(e, connection))
         return json.dumps(payload, default=str)
 
