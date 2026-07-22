@@ -22,6 +22,30 @@ import db_security as _security
 
 from connections import LockedDBManager as DBManager, connection_type
 
+
+def clean_db_error(msg: str) -> str:
+    """Strip a DBMS exception's embedded stack trace, keeping the actionable message.
+
+    ClickHouse embeds a C++ server trace directly in the exception text, e.g.:
+        Code: 47. DB::Exception: Missing columns: 'x' ... required columns: 'x'. Stack trace:
+
+        0. DB::Exception::Exception(...) @ 0x... in /usr/bin/clickhouse
+        1. ...
+    Those frames are internal server symbols (hex addresses in /usr/bin/clickhouse)
+    that never reference the caller's SQL, column, or table; the message before
+    'Stack trace:' already names the offending column/table/query, so we keep it
+    and drop the trace. No-op for errors with no embedded trace (MySQL/pymysql,
+    config errors, transport errors). Never raises.
+    """
+    if not msg:
+        return msg
+    marker = msg.find('Stack trace:')
+    if marker == -1:
+        return msg
+    cleaned = msg[:marker].rstrip()
+    return cleaned or msg
+
+
 # LIMIT enforcement for SELECT/WITH queries
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 2000
@@ -244,7 +268,7 @@ def table_schema_query(tbl_name: str, connection: str = 'ck', force_refresh: boo
     except Exception as e:
         if tbl_name in cache:
             return cache[tbl_name]
-        return {'error': str(e)}
+        return {'error': clean_db_error(str(e))}
 
 
 # --- Table Info ---
@@ -294,7 +318,7 @@ def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool 
     except Exception as e:
         if tbl_name in cache:
             return cache[tbl_name]
-        return {'error': str(e)}
+        return {'error': clean_db_error(str(e))}
 
 
 # --- History ---
@@ -331,7 +355,7 @@ def list_connections() -> str:
     try:
         cfg = DBManager.load_config(CONFIG_FILE)
     except FileNotFoundError as e:
-        return json.dumps({"connections": [], "count": 0, "error": str(e)}, default=str)
+        return json.dumps({"connections": [], "count": 0, "error": clean_db_error(str(e))}, default=str)
     connections = []
     for section in cfg.sections():
         if section.lower().startswith('ssh:'):
@@ -395,7 +419,7 @@ def list_tables(connection: str = 'ck', database: str | None = None, like: str |
 
         return json.dumps({"tables": tables, "count": len(tables)}, default=str)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": clean_db_error(str(e))})
 
 
 # --- Cross-Connection Table Locator ---
@@ -530,14 +554,14 @@ def find_table_query(search: str, limit: int = 10) -> str:
             ctype = connection_type(cfg, section)
         except Exception as e:
             searched.append({"name": section, "type": None,
-                             "status": "error", "error": str(e)})
+                             "status": "error", "error": clean_db_error(str(e))})
             continue
 
         try:
             client = getattr(DBManager(), section)
         except Exception as e:
             searched.append({"name": section, "type": ctype,
-                             "status": "error", "error": str(e)})
+                             "status": "error", "error": clean_db_error(str(e))})
             continue
 
         conn_err = None
@@ -545,7 +569,7 @@ def find_table_query(search: str, limit: int = 10) -> str:
             rows = _exec_catalog(client, _catalog_query(ctype, term))
         except Exception as e:
             rows = []
-            conn_err = str(e)
+            conn_err = clean_db_error(str(e))
 
         # Fast path empty -> fuzzy fallback over cached full table list
         if not rows:
@@ -558,7 +582,7 @@ def find_table_query(search: str, limit: int = 10) -> str:
                     full = _exec_catalog(client, _full_catalog_query(ctype))
                     _save_table_list_cache(section, full)
                 except Exception as e:
-                    conn_err = conn_err or str(e)
+                    conn_err = conn_err or clean_db_error(str(e))
                     full = []
             rows = full
 
@@ -635,7 +659,7 @@ def explain_query(sql: str, connection: str = 'ck') -> str:
             "cost_estimates": cost_info if cost_info else None,
         }, default=str)
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": clean_db_error(str(e))})
 
 
 # --- Decimal Handling ---
@@ -708,4 +732,4 @@ def execute_query(sql: str, connection: str = 'ck') -> str:
         return json.dumps(result_data, default=str)
 
     except Exception as e:
-        return json.dumps({"error": str(e)})
+        return json.dumps({"error": clean_db_error(str(e))})
