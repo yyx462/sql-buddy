@@ -120,22 +120,22 @@ def _check_ssh(needed: bool) -> tuple[str, str, str]:
 
 
 def _parse_db_ini():
-    """Return (configparser.ConfigParser, error_or_None). Stdlib only — no
-    driver imports — so doctor stays lightweight and offline."""
-    import configparser
+    """Return (configparser, error_or_None).
+
+    Uses the shared `connections.config_util.read_config` reader (UTF-8-BOM /
+    UTF-8 / GBK, same as the runtime) so doctor agrees with what the server
+    will actually load. Never echoes the raw parse exception — ConfigParser
+    errors embed the offending source line, which on db.ini can be a password.
+    """
     cfg_file = os.path.join(_HERE, "connections", "config", "db.ini")
     if not os.path.exists(cfg_file):
         return None, f"db.ini not found at {cfg_file} (run: sql-buddy init)"
-    cfg = configparser.ConfigParser()
     try:
-        cfg.read(cfg_file)
-    except configparser.Error:
-        # Do NOT include the exception text: ConfigParser errors embed the
-        # offending source line, which on db.ini could be a password. Report a
-        # generic parse failure and let the user re-open the file themselves.
-        return None, ("db.ini failed to parse (syntax error; the offending line "
-                      "is hidden to avoid leaking secrets)")
-    return cfg, None
+        from connections.config_util import read_config
+        return read_config(cfg_file), None
+    except Exception:
+        return None, ("db.ini failed to parse (syntax/encoding error; the "
+                      "offending line is hidden to avoid leaking secrets)")
 
 
 def _connection_names(cfg) -> list[str]:
@@ -202,20 +202,22 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
     """Check one mcpServers entry resolves: command on PATH/exists AND every
     absolute path in its args is present. Returns (ok, detail).
 
-    The arg-path check catches the two classic breakages: a `command` pointing at
-    a deleted `.venv/bin/python`, and an `args` path (the repo dir / server.py)
-    that moved after the config was written.
+    Every non-absolute command is checked with shutil.which (not an allowlist) —
+    a bare name like `sql-buddy` or a typo must fail, not silently "resolve".
+    Absolute / relative path commands are checked on the filesystem.
     """
     cmd = entry.get("command")
     args = entry.get("args") or []
-    if not cmd:
+    if not cmd or not isinstance(cmd, str):
         return False, "no 'command' set"
-    if cmd in ("uv", "uvx", "npx", "node", "python", "python3"):
-        if not shutil.which(cmd):
-            return False, f"command '{cmd}' not found on PATH"
-    elif os.path.isabs(cmd):
+    if os.path.isabs(cmd) or os.sep in cmd or (os.altsep and os.altsep in cmd):
+        # Absolute or relative filesystem path
         if not os.path.exists(cmd):
             return False, f"command path MISSING: {cmd}"
+    else:
+        # Bare executable name — must be on PATH
+        if not shutil.which(cmd):
+            return False, f"command '{cmd}' not found on PATH"
     missing = [a for a in args
                if isinstance(a, str) and os.path.isabs(a) and not os.path.exists(a)]
     if missing:
@@ -375,43 +377,66 @@ def update_check() -> int:
         return 0
     print(f"local : {local[:12]}  sql-buddy {get_version()}")
 
+    remote_name, branch_name = "origin", "master"
     rc, upstream_ref, _ = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     if rc != 0:
         # No upstream configured. Try origin/<current-branch> as a best effort.
         rc2, branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"])
-        branch = branch or "master"
-        rc, remote, err = _git(["ls-remote", "origin", branch])
-        if rc != 0:
-            print(f"Could not reach remote 'origin' ({err or 'offline'}). "
-                  "Skipping remote comparison.")
-            return 0
-        remote_sha = (remote.split()[0] if remote else "").strip()
-        upstream_label = f"origin/{branch}"
+        branch_name = branch or "master"
+        remote_name = "origin"
+        upstream_label = f"origin/{branch_name}"
     else:
         upstream_label = upstream_ref
-        # Fetch is intentionally skipped (no network mutation, works offline-ish
-        # against already-known refs); query the remote tip directly.
         parts = upstream_ref.split("/", 1)
-        remote_name, branch_name = (parts + [None])[:2] if len(parts) == 2 else ("origin", parts[0])
-        rc, remote, err = _git(["ls-remote", remote_name, branch_name])
-        if rc != 0:
-            print(f"Could not reach '{upstream_label}' ({err or 'offline'}). "
-                  "Skipping remote comparison.")
-            return 0
-        remote_sha = (remote.split()[0] if remote else "").strip()
+        if len(parts) == 2:
+            remote_name, branch_name = parts
+        else:
+            remote_name, branch_name = "origin", parts[0]
 
-    print(f"remote: {remote_sha[:12]}  {upstream_label}")
+    rc, remote, err = _git(["ls-remote", remote_name, branch_name])
+    if rc != 0:
+        print(f"Could not reach '{upstream_label}' ({err or 'offline'}). "
+              "Skipping remote comparison.")
+        return 0
+    remote_sha = (remote.split()[0] if remote else "").strip()
+
+    print(f"remote: {remote_sha[:12] if remote_sha else '(none)'}  {upstream_label}")
     if not remote_sha:
         print("Remote ref not found. Check your network or the branch name.")
         return 0
     if remote_sha == local:
         print("Up to date.")
         return 0
-    # Distinguish behind (update available) from ahead (unpushed local commits)
-    # and diverged, using commit ancestry rather than mere SHA inequality.
+
+    # ls-remote only returns a SHA — the object may not be in the local store.
+    # merge-base needs the object; fetch the tip if missing, otherwise ancestry
+    # checks exit 128 and we'd mis-report "diverged".
+    rc_has, _, _ = _git(["cat-file", "-e", f"{remote_sha}^{{commit}}"])
+    if rc_has != 0:
+        rc_f, _, err_f = _git(["fetch", "--quiet", remote_name, branch_name])
+        if rc_f != 0:
+            print(f"Remote tip {remote_sha[:12]} is not in local history and "
+                  f"fetch failed ({err_f or 'offline'}). Run: git fetch")
+            return 0
+        # re-check after fetch
+        rc_has2, _, _ = _git(["cat-file", "-e", f"{remote_sha}^{{commit}}"])
+        if rc_has2 != 0:
+            print(f"Fetched {upstream_label} but still missing object "
+                  f"{remote_sha[:12]}. Run: git fetch {remote_name}")
+            return 0
+
+    # Distinguish behind / ahead / diverged via commit ancestry.
     # `merge-base --is-ancestor A B` exits 0 when A is reachable from B.
-    rc_local_in_remote, _, _ = _git(["merge-base", "--is-ancestor", "HEAD", remote_sha])
-    rc_remote_in_local, _, _ = _git(["merge-base", "--is-ancestor", remote_sha, "HEAD"])
+    rc_local_in_remote, _, err_a = _git(
+        ["merge-base", "--is-ancestor", "HEAD", remote_sha])
+    rc_remote_in_local, _, err_b = _git(
+        ["merge-base", "--is-ancestor", remote_sha, "HEAD"])
+    # exit 128 = git error (still-missing object, corrupt repo, …) — don't
+    # pretend we know the relationship.
+    if rc_local_in_remote == 128 or rc_remote_in_local == 128:
+        print(f"Could not compare ancestry ({err_a or err_b or 'git error'}). "
+              f"Run: git fetch && git status")
+        return 0
     if rc_local_in_remote == 0:
         print("Update available. Run:  git pull")
         print("(then `uv pip install -e .` if dependencies changed)")
