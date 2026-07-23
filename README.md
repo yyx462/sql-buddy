@@ -29,6 +29,34 @@ Your AI agent  ──MCP──►  SQL Buddy (runs on your laptop)  ──►  y
 
 ---
 
+## Quickstart (60 seconds)
+
+Already have [`uv`](https://docs.astral.sh/uv/) and SSH access? The whole install
+is one command — `uv run` provisions an isolated `.venv` and installs deps for you,
+so there is no separate `venv`/`pip install` step:
+
+```bash
+git clone <this-repo-url> sql-buddy && cd sql-buddy
+uv run server.py            # installs deps, then starts the server (Ctrl+C to stop)
+```
+
+Then configure your databases and validate everything in one shot:
+
+```bash
+uv run sql-buddy init       # interactive wizard → writes connections/config/db.ini
+uv run sql-buddy doctor     # green-checks the venv, db.ini, and MCP client config
+uv run sql-buddy mcp add    # registers sql-buddy with Claude Code (writes .mcp.json)
+```
+
+`uv run sql-buddy <command>` works from any directory. Subcommands: `version`,
+`doctor [--connect]`, `mcp print|add`, `update-check`, `init`. **Bare `sql-buddy`
+(no command) runs the MCP server** — that's what your AI client invokes, so MCP
+client configs hold no fragile absolute path to `.venv/bin/python`.
+
+New here? Walk through the full [Setup](#setup) below.
+
+---
+
 ## Prerequisites
 
 You will need:
@@ -54,25 +82,31 @@ You will need:
 git clone <this-repo-url> sql-buddy
 cd sql-buddy
 
-# Create an isolated Python environment and install
-uv venv .venv --python 3.11
-uv pip install -e .
-```
-
-> No `uv`? You can use plain pip instead:
-> ```bash
-> python3.11 -m venv .venv
-> source .venv/bin/activate
-> pip install -e .
-> ```
-
-Quick smoke test (starts the server, then `Ctrl+C` to stop):
-
-```bash
-.venv/bin/python server.py
+# `uv run` creates an isolated .venv and installs dependencies for you.
+# Smoke-test the server (Ctrl+C to stop):
+uv run server.py
 ```
 
 If it prints no errors, the install worked. Stop it for now - we configure databases next.
+
+This also gives you the `sql-buddy` command (run via `uv run sql-buddy …` or
+`.venv/bin/sql-buddy …` once the env exists):
+
+| Command | What it does |
+|---------|--------------|
+| `sql-buddy version` | Print the installed version. |
+| `sql-buddy doctor` | Validate the install: venv, `db.ini`, and MCP client config. Add `--connect` to also ping each database. |
+| `sql-buddy init` | Interactive setup wizard (writes `db.ini`). Accepts `--non-interactive --json` for agents/CI. |
+| `sql-buddy mcp print` | Print the MCP client config block (paths filled in). `--python` for a `sys.executable`-based config. |
+| `sql-buddy mcp add` | Write that block straight into Claude Code's config (`.mcp.json` or `~/.claude.json`). |
+| `sql-buddy update-check` | Compare your checkout to the git remote; tells you when to `git pull`. |
+
+> Prefer plain pip, or need the explicit venv?
+> ```bash
+> python3.11 -m venv .venv && source .venv/bin/activate && pip install -e .
+> # or with uv:  uv venv .venv --python 3.11 && uv pip install -e .
+> .venv/bin/sql-buddy doctor   # then use .venv/bin/sql-buddy / .venv/bin/python server.py
+> ```
 
 ---
 
@@ -247,52 +281,71 @@ with `git status` before pushing - it should never appear as a tracked file.
 
 ### Step 4: Test it works
 
-Point SQL Buddy at your databases:
+One command validates the install and (optionally) pings each database:
 
 ```bash
-# List the connections SQL Buddy found in db.ini
-.venv/bin/python -c "import db_query; print(db_query.list_connections())"
+uv run sql-buddy doctor             # offline: venv + db.ini shape + MCP client config
+uv run sql-buddy doctor --connect   # also opens each tunnel and runs SELECT 1
+```
 
-# Run a real read query - this opens the SSH tunnel on first use
-.venv/bin/python -c "import db_query; print(db_query.execute_limit_query('SELECT 1','ck'))"
+`--connect` opens the SSH tunnel on first use (it can take a few seconds per
+connection, and longer if a bastion is unreachable). If every line is `OK`, the
+tunnel came up and you're ready to wire it into your AI agent.
 
+```bash
 # (optional) Set which connection is used when the agent doesn't specify one
 export SQL_BUDDY_DEFAULT_CONNECTION=ck
 ```
-
-If the query returns rows, the tunnel came up and you're ready to wire it into your AI agent.
 
 ---
 
 ### Step 5: Connect your AI agent (MCP config)
 
-Add SQL Buddy to your MCP client's config. For **Claude Code**, edit
-`.claude/settings.json` (project or global) and replace the paths with **your** real ones:
+Easiest: let sql-buddy write the config for you.
+
+```bash
+uv run sql-buddy mcp add                 # project scope → writes ./.mcp.json (Claude Code)
+uv run sql-buddy mcp add --scope user    # user scope   → writes ~/.claude.json
+```
+
+Restart your client and you're done. Preview the exact block first with
+`uv run sql-buddy mcp print`. It produces this (paths filled in for you) — the
+**`uv --directory … run`** form auto-provisions the venv and carries no absolute
+`.venv/bin/python` path to go stale:
 
 ```json
 {
   "mcpServers": {
     "sql-buddy": {
-      "command": "/absolute/path/to/sql-buddy/.venv/bin/python",
-      "args": ["/absolute/path/to/sql-buddy/server.py"]
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/sql-buddy", "run", "server.py"]
     }
   }
 }
 ```
 
-> ⚠️ **The `command` path must exist before this works.** `…/.venv/bin/python` is
-> created in Step 1's install (`uv venv .venv … && uv pip install -e .`). If you
-> skipped install, the MCP server fails to start with a "no such file" error.
-> Verify, and create it if missing:
->
-> ```bash
-> ls /absolute/path/to/sql-buddy/.venv/bin/python     # should print the path back
-> # if it's missing, run Step 1 first, then wire up the MCP config:
-> cd /absolute/path/to/sql-buddy && uv venv .venv --python 3.11 && uv pip install -e .
-> ```
+> No `uv` on the machine that runs your MCP client? Use the Python form instead:
+> `sql-buddy mcp print --python` (or `mcp add --python`) — it sets `command` to the
+> interpreter running the CLI (`sys.executable`), the most robust absolute path.
 
-Then restart your client. Ask your agent something like *"list the tables in the `ck`
-connection"* - if it can answer, you're live. 🎉
+Ask your agent something like *"list the tables in the `ck` connection"* - if it
+can answer, you're live. 🎉
+
+---
+
+## Updating
+
+Check whether a newer version is available, then pull:
+
+```bash
+uv run sql-buddy update-check     # compares your checkout to the git remote
+git pull                          # apply the update
+uv run server.py                  # `uv run` re-syncs deps if they changed
+```
+
+`sql-buddy version` prints what you're running. If you installed via a vendored
+bundle instead of git, re-download the latest release to update. Your `db.ini` is
+never touched by an update — it's gitignored and lives outside the tracked code.
 
 ---
 
@@ -303,17 +356,19 @@ value below. Ask the user explicitly, one at a time, in plain language.
 
 > **Drive the setup straight after `git clone`** — do not stall at "what next?". The
 > whole point is for the user to be querying databases 5 minutes after cloning. Once
-> step 1's `uv pip install -e .` returns, immediately proceed to steps 2-5 to
-> collect values and write `db.ini`. The only blocker between you and a finished
-> install is the user-supplied values in steps 2-4 — get to those questions now.
+> step 1's `uv run server.py` returns, immediately proceed to steps 2-5 to collect
+> values and write `db.ini`. The only blocker between you and a finished install is
+> the user-supplied values in steps 2-4 — get to those questions now.
 
-> The `init.py` wizard is interactive (for humans). As an agent, **write `db.ini`
-> directly** with your file-editing tool instead of driving the wizard - it's faster
-> and avoids pasting secrets through a prompt.
+> Prefer the structured path to `db.ini`: collect the values below, then write them
+> with **`uv run sql-buddy init --non-interactive --json '<spec>'`** (schema in
+> `init.py` docstring). It validates and writes `db.ini` for you — no hand-formatting
+> INI, and secrets go straight from the spec into the file, never echoed. You can
+> also write `db.ini` directly with your file-editing tool if you prefer.
 
-1. **The repository** - clone it, then `uv venv .venv --python 3.11 && uv pip install -e .`
-   inside it. As soon as this returns, **move to step 2 — do not stop to ask "what
-   next?"**.
+1. **The repository** - clone it, then `uv run server.py` (Ctrl+C once it starts —
+   that one command created the venv and installed deps). As soon as it returns,
+   **move to step 2 — do not stop to ask "what next?"**.
 2. **Ask the user which mode** they want:
    - **Auto** - sql-buddy opens the SSH tunnel itself. Continue to step 3.
    - **External** - the user already runs a tunnel/connection (e.g. `ssh -N` on Windows).
@@ -370,10 +425,10 @@ value below. Ask the user explicitly, one at a time, in plain language.
      `tunnel = ssh:*` and its `remote_host`/`remote_port`/`local_port` (no `host`/`port`).
    - External: each connection with `host`/`port`/`user`/`password` (and `database` for
      ClickHouse). No `[ssh:*]` block.
-6. **Verify** with
-   `python -c "import db_query; print(db_query.check_connection_query('<conn>'))"`.
-   Expect `{"status":"ok","latency_ms":...}`. On `status:'error'`, read the `hint` and
-   follow it (in External mode an error usually means the user's tunnel is down).
+6. **Verify** with `uv run sql-buddy doctor --connect`. Expect every line to read
+   `OK` (it runs `SELECT 1` over each connection and opens the tunnel on first use).
+   Any `FAIL` line is self-explanatory; read the tool-error `hint` and follow it (in
+   External mode a transport error usually means the user's tunnel is down).
    **Common Auto-mode failures and fixes:**
    - hangs at "Connecting to host port 22" but you specified another `-p` → sshd not
      reachable on that port. Confirm the port with ops.
@@ -382,15 +437,14 @@ value below. Ask the user explicitly, one at a time, in plain language.
    - tunnel comes up but DB call times out → wrong `remote_host`/`remote_port`
      (those are the DB *as seen from the bastion*, not from the laptop).
 7. **Confirm `db.ini` is not tracked** by git (`git status` should not list it).
-8. **Register the MCP server** in the user's client config with absolute paths to their
-   `.venv/bin/python` and `server.py`. **Confirm the venv exists first** — that
-   `command` path is created only by step 1's install; if it's missing the server
-   will not start (the MCP client typically fails silently or logs a "no such file").
-   Verify and create in one shot:
+8. **Register the MCP server** with one command — it writes the `uv --directory … run`
+   config straight into the client (no absolute `.venv/bin/python` path to verify):
    ```bash
-   test -x /abs/path/to/sql-buddy/.venv/bin/python && echo "venv ok" \
-     || (cd /abs/path/to/sql-buddy && uv venv .venv --python 3.11 && uv pip install -e .)
+   uv run sql-buddy mcp add --scope user     # ~/.claude.json (user-global)
+   # or, for a single project:  uv run sql-buddy mcp add   # → ./.mcp.json
+   uv run sql-buddy mcp print                 # preview the exact block first if you like
    ```
+   Then tell the user to restart their MCP client.
 
 Never write credentials to anywhere except `db.ini`. Never commit `db.ini`. When using
 the running server, every tool error JSON carries a `hint` - follow it rather than
@@ -436,13 +490,17 @@ table hints at `find_table`. Agents should read and follow the `hint`.
 ### File layout
 
 ```
+.mcp.json                             # project-scope MCP client config (uv run server.py)
 connections/config/db.ini          # your credentials + ssh blocks (gitignored, never commit)
 connections/config/db.ini.example  # template (committed)
 database/                             # caches + query history (gitignored)
-server.py                             # MCP server entrypoint
+server.py                             # MCP server entrypoint (bare run = serve over stdio)
+cli.py                                # `sql-buddy` CLI: doctor / mcp / version / update-check
 db_query.py                           # query logic
+db_security.py                        # secret-redaction + .env loader (installed at startup)
 tunnel.py                             # self-managed SSH tunnels (one ssh -N per [ssh:*] block)
-init.py                               # interactive setup wizard (writes db.ini)
+init.py                               # setup wizard — interactive, or --non-interactive --json
+_version.py                           # single source of truth for the version
 ```
 
 ---

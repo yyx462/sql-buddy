@@ -1,6 +1,7 @@
 **/*.pyc
 **/__pycache__/
 .venv/
+*.egg-info/
 database/
 
 # Database config files (never commit credentials!)

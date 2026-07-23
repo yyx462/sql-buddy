@@ -1,6 +1,6 @@
 [project]
 name = "sql-buddy"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for read-only database access (MySQL, ClickHouse)"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,6 +11,23 @@ dependencies = [
 ]
 license = { text = "MIT" }
 
+# Explicit build backend + module list. The repo uses a *flat layout*
+# (top-level .py files + the `connections` package), so we must declare the
+# modules explicitly — otherwise setuptools auto-discovery only registers
+# `connections`, and `import cli` / `import server` fail from the installed
+# console scripts (which don't have the repo dir on sys.path). `python
+# server.py` keeps working regardless (the script dir is on sys.path).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server", "cli", "init", "db_query", "db_security", "tunnel", "_version", "test_vendor"]
+packages = ["connections"]
+
+# Entry points. `sql-buddy` with no args runs the MCP server (so MCP client
+# configs keep working); subcommands (doctor, mcp, version, update-check) are
+# dispatched by cli.main. `sql-buddy-init` is the interactive setup wizard.
 [project.scripts]
-sql-buddy = "server:main"
+sql-buddy = "cli:main"
 sql-buddy-init = "init:main"

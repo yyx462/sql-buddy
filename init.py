@@ -15,6 +15,7 @@ Run:  python init.py        (or, after `uv pip install -e .`:  sql-buddy-init)
 """
 
 import configparser
+import json
 import os
 import shutil
 import sys
@@ -204,12 +205,20 @@ def _setup_auto():
     _add_connection_auto(cfg, block)
     while _yes_no("\nAdd another connection?", default=False):
         _add_connection_auto(cfg, block)
+    _write_cfg(cfg, "auto - self-managed SSH tunnels")
 
+
+def _write_cfg(cfg, mode_label: str):
+    """Back up any existing db.ini, then write `cfg` to CONFIG_FILE.
+
+    Shared by the interactive and non-interactive paths so they can never
+    drift in how they persist + verify.
+    """
     bak = _backup_existing()
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, 'w') as f:
         cfg.write(f)
-    print(f"\nWrote {CONFIG_FILE}  (mode: auto - self-managed SSH tunnels)")
+    print(f"\nWrote {CONFIG_FILE}  (mode: {mode_label})")
     if bak:
         print(f"Previous config backed up to {bak}")
     print("\n" + _VERIFY_HINT)
@@ -230,6 +239,23 @@ def _setup_external():
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="sql-buddy-init",
+        description="sql-buddy setup wizard — writes connections/config/db.ini",
+    )
+    parser.add_argument(
+        "--non-interactive", action="store_true",
+        help="write db.ini from a JSON spec without prompting (for agents / CI)",
+    )
+    parser.add_argument("--json", dest="json_str", help="setup spec as a JSON string")
+    parser.add_argument("--json-file", dest="json_file", help="path to a setup-spec JSON file")
+    args = parser.parse_args()
+
+    if args.non_interactive:
+        _setup_non_interactive(_load_spec(args.json_str, args.json_file))
+        return
+
     print(
         "=== sql-buddy setup ===\n"
         f"Configures {CONFIG_FILE}"
@@ -239,6 +265,119 @@ def main():
         _setup_auto()
     else:
         _setup_external()
+
+
+# --- non-interactive spec -> db.ini ---------------------------------------
+# Driven by a JSON object so an agent (or CI) can produce db.ini without the
+# interactive prompts. Secrets stay local: they go straight from the spec into
+# db.ini, never echoed.
+#
+# Schema (auto mode):
+#   {"mode":"auto",
+#    "ssh": {"name":"prod","host":"...","port":22,"user":"...","key":"~/.ssh/...",
+#            "server_alive_interval":30,"server_alive_count_max":3},
+#    "connections":[{"name":"ck","type":"clickhouse",
+#                    "remote_host":"10.0.0.21","remote_port":9000,"local_port":10021,
+#                    "user":"ro","password":"...","database":"default"}]}
+#
+# Schema (external mode):
+#   {"mode":"external",
+#    "connections":[{"name":"ck","type":"clickhouse","host":"localhost","port":9000,
+#                    "user":"ro","password":"...","database":"default"}]}
+
+def _guess_type(name: str) -> str:
+    """Mirror the section-name inference used at query time (ck*->clickhouse, else mysql)."""
+    low = name.lower()
+    if low.startswith("ck"):
+        return "clickhouse"
+    if low.startswith(("db", "mysql")):
+        return "mysql"
+    return "mysql"
+
+
+def _require(d: dict, key: str, where: str):
+    if key not in d or d[key] in (None, ""):
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    return d[key]
+
+
+def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
+    name = _require(conn, "name", "connection")
+    if cfg.has_section(name) or cfg.has_section(f"ssh:{name}"):
+        raise SystemExit(f"connection name '{name}' is duplicated or reserved")
+    cfg.add_section(name)
+    cfg.set(name, "type", str(conn.get("type") or _guess_type(name)))
+    if auto_block is not None:
+        cfg.set(name, "tunnel", f"ssh:{auto_block}")
+        for k in ("remote_host", "remote_port", "local_port", "user", "password"):
+            cfg.set(name, k, str(_require(conn, k, f"connection [{name}]")))
+    else:
+        for k in ("host", "port", "user", "password"):
+            cfg.set(name, k, str(_require(conn, k, f"connection [{name}]")))
+    if conn.get("database"):
+        cfg.set(name, "database", str(conn["database"]))
+
+
+def _cfg_from_auto_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
+    ssh = spec.get("ssh") or {}
+    block = ssh.get("name") or "prod"
+    section = f"ssh:{block}"
+    cfg = configparser.RawConfigParser()
+    cfg.add_section(section)
+    cfg.set(section, "host", str(_require(ssh, "host", "ssh")))
+    cfg.set(section, "port", str(ssh.get("port", 22)))
+    cfg.set(section, "user", str(_require(ssh, "user", "ssh")))
+    cfg.set(section, "key", str(_require(ssh, "key", "ssh")))
+    cfg.set(section, "server_alive_interval", str(ssh.get("server_alive_interval", 30)))
+    cfg.set(section, "server_alive_count_max", str(ssh.get("server_alive_count_max", 3)))
+    conns = spec.get("connections") or []
+    if not conns:
+        raise SystemExit("at least one connection is required")
+    for c in conns:
+        _add_conn_section(cfg, c, auto_block=block)
+    return cfg, "auto - self-managed SSH tunnels"
+
+
+def _cfg_from_external_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
+    cfg = configparser.RawConfigParser()
+    conns = spec.get("connections") or []
+    if not conns:
+        raise SystemExit("at least one connection is required")
+    for c in conns:
+        _add_conn_section(cfg, c, auto_block=None)
+    return cfg, "external"
+
+
+def _load_spec(json_str: str | None, json_file: str | None) -> dict:
+    raw = json_str
+    if raw is None and json_file:
+        with open(os.path.expanduser(json_file)) as f:
+            raw = f.read()
+    if raw is None:
+        raw = os.environ.get("SQL_BUDDY_SETUP_JSON")
+    if raw is None:
+        raise SystemExit(
+            "--non-interactive needs one of: --json '<spec>' / --json-file <path> "
+            "/ $SQL_BUDDY_SETUP_JSON"
+        )
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"invalid setup JSON: {e}")
+    if not isinstance(spec, dict):
+        raise SystemExit("setup spec must be a JSON object")
+    return spec
+
+
+def _setup_non_interactive(spec: dict):
+    mode = (spec.get("mode") or "auto").lower()
+    if mode == "auto":
+        cfg, label = _cfg_from_auto_spec(spec)
+    elif mode == "external":
+        cfg, label = _cfg_from_external_spec(spec)
+    else:
+        raise SystemExit(f"unknown mode '{mode}' (want 'auto' or 'external')")
+    _write_cfg(cfg, label)
 
 
 if __name__ == "__main__":
