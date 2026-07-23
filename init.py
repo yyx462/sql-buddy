@@ -248,19 +248,16 @@ def main(argv: list[str] | None = None):
         "--non-interactive", action="store_true",
         help="write db.ini from a JSON spec without prompting (for agents / CI)",
     )
-    parser.add_argument(
-        "--json", dest="json_str",
-        help="setup spec as a JSON string. AVOID for credentials: argv is visible "
-             "in process listings and shell history. Use --json-file or --json-stdin.",
-    )
+    # No --json '<inline>': argv is visible in process listings and shell/agent
+    # history, so credentials must never travel that way. Use stdin or a file.
     parser.add_argument("--json-file", dest="json_file",
                         help="path to a setup-spec JSON file (use '-' for stdin)")
     parser.add_argument("--json-stdin", action="store_true",
-                        help="read the setup spec from stdin (recommended for secrets)")
+                        help="read the setup spec from stdin (preferred for secrets)")
     args = parser.parse_args(argv)
 
     if args.non_interactive:
-        _setup_non_interactive(_load_spec(args.json_str, args.json_file, args.json_stdin))
+        _setup_non_interactive(_load_spec(args.json_file, args.json_stdin))
         return 0
 
     print(
@@ -417,15 +414,12 @@ def _cfg_from_external_spec(spec: dict) -> tuple[configparser.RawConfigParser, s
     return cfg, "external"
 
 
-def _load_spec(json_str: str | None, json_file: str | None, json_stdin: bool) -> dict:
+def _load_spec(json_file: str | None, json_stdin: bool) -> dict:
     """Resolve the setup spec to a JSON object.
 
-    Secret-safe precedence: stdin (--json-stdin, or --json-file -) > protected
-    file (--json-file) > $SQL_BUDDY_SETUP_JSON env > inline --json string.
-    Inline --json is allowed for convenience/testing but discouraged for
-    credentials, since argv is visible in process listings and shell history.
-    A credentials-bearing --json-file must never be silently overridden by an
-    argv-visible --json string, so file wins over inline.
+    Secret-safe sources only (no inline argv JSON):
+      stdin (--json-stdin, or --json-file -) > protected file (--json-file)
+      > $SQL_BUDDY_SETUP_JSON env.
     """
     raw: str | None = None
     if json_stdin or json_file == "-":
@@ -435,13 +429,10 @@ def _load_spec(json_str: str | None, json_file: str | None, json_stdin: bool) ->
             raw = f.read()
     elif os.environ.get("SQL_BUDDY_SETUP_JSON") is not None:
         raw = os.environ.get("SQL_BUDDY_SETUP_JSON")
-    elif json_str is not None:
-        raw = json_str
     if raw is None:
         raise SystemExit(
             "--non-interactive needs one of: --json-stdin / --json-file <path|-> "
-            "/ --json '<spec>' / $SQL_BUDDY_SETUP_JSON (prefer stdin or a file "
-            "for credentials)"
+            "/ $SQL_BUDDY_SETUP_JSON (credentials must not travel via argv)"
         )
     try:
         spec = json.loads(raw)

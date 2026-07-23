@@ -339,6 +339,10 @@ def _live_hint(msg: str) -> str:
 def _check_connection_live(name: str) -> tuple[str, str, str]:
     """Ping one Connection (SELECT 1). Returns (label, severity, detail)."""
     try:
+        # Match server startup: load .env + install secret filters before any
+        # db_query / connections import so $env: refs in db.ini resolve.
+        import db_security
+        db_security.install()
         import db_query
         raw = db_query.check_connection_query(name)
         res = json.loads(raw)
@@ -471,10 +475,12 @@ def update_check() -> int:
         else:
             remote_name, branch_name = "origin", parts[0]
 
-    rc, remote, err = _git(["ls-remote", remote_name, branch_name])
+    # Never print raw git stderr: it can embed credential-bearing remote URLs
+    # (https://user:TOKEN@host/...) even after partial redaction.
+    rc, remote, _err = _git(["ls-remote", remote_name, branch_name])
     if rc != 0:
-        print(f"Could not reach '{upstream_label}' ({err or 'offline'}). "
-              "Skipping remote comparison.")
+        print(f"Could not reach '{upstream_label}' (offline or auth failed). "
+              "Skipping remote comparison. Try: git fetch")
         return 0
     remote_sha = (remote.split()[0] if remote else "").strip()
 
@@ -491,10 +497,10 @@ def update_check() -> int:
     # checks exit 128 and we'd mis-report "diverged".
     rc_has, _, _ = _git(["cat-file", "-e", f"{remote_sha}^{{commit}}"])
     if rc_has != 0:
-        rc_f, _, err_f = _git(["fetch", "--quiet", remote_name, branch_name])
+        rc_f, _, _err_f = _git(["fetch", "--quiet", remote_name, branch_name])
         if rc_f != 0:
             print(f"Remote tip {remote_sha[:12]} is not in local history and "
-                  f"fetch failed ({err_f or 'offline'}). Run: git fetch")
+                  f"fetch failed. Run: git fetch")
             return 0
         # re-check after fetch
         rc_has2, _, _ = _git(["cat-file", "-e", f"{remote_sha}^{{commit}}"])
@@ -505,15 +511,14 @@ def update_check() -> int:
 
     # Distinguish behind / ahead / diverged via commit ancestry.
     # `merge-base --is-ancestor A B` exits 0 when A is reachable from B.
-    rc_local_in_remote, _, err_a = _git(
+    rc_local_in_remote, _, _ = _git(
         ["merge-base", "--is-ancestor", "HEAD", remote_sha])
-    rc_remote_in_local, _, err_b = _git(
+    rc_remote_in_local, _, _ = _git(
         ["merge-base", "--is-ancestor", remote_sha, "HEAD"])
     # exit 128 = git error (still-missing object, corrupt repo, …) — don't
     # pretend we know the relationship.
     if rc_local_in_remote == 128 or rc_remote_in_local == 128:
-        print(f"Could not compare ancestry ({err_a or err_b or 'git error'}). "
-              f"Run: git fetch && git status")
+        print("Could not compare ancestry. Run: git fetch && git status")
         return 0
     if rc_local_in_remote == 0:
         print("Update available. Run:  git pull")

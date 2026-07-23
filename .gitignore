@@ -12,6 +12,10 @@ database/
 *.ini.bak*
 *.bak
 *.bak[0-9]*
+# mcp add backups of client configs (may hold third-party API tokens)
+.mcp.json.bak*
+*.json.bak*
+*.json.bak[0-9]*
 .env
 .env.local
 tmp/

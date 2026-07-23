@@ -40,7 +40,7 @@ git clone <this-repo-url> sql-buddy && cd sql-buddy
 uv run server.py            # installs deps, then starts the server (Ctrl+C to stop)
 ```
 
-Then configure your databases and validate everything in one shot:
+Then configure your Connections and validate everything in one shot:
 
 ```bash
 uv run sql-buddy init       # interactive wizard → writes connections/config/db.ini
