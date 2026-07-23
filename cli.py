@@ -310,13 +310,31 @@ def _mcp_candidate_files() -> list[str]:
     return uniq
 
 
-def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
+def _is_trae_config_path(path: str) -> bool:
+    """True if `path` is a Trae MCP config (project .trae/mcp.json or User/mcp.json)."""
+    norm = path.replace("\\", "/").lower()
+    if norm.endswith("/.trae/mcp.json") or norm.endswith("/.trae\\mcp.json"):
+        return True
+    if "/.trae/" in norm and norm.endswith("mcp.json"):
+        return True
+    # User-scope: …/Trae/User/mcp.json or …/Trae CN/User/mcp.json
+    if norm.endswith("/user/mcp.json") and "/trae" in norm:
+        return True
+    if norm.endswith("/.trae/mcp.json"):
+        return True
+    return False
+
+
+def _validate_mcp_entry(entry: dict, *, trae: bool = False) -> tuple[bool, str]:
     """Check one mcpServers entry resolves: command on PATH/exists AND every
     absolute path in its args is present. Returns (ok, detail).
 
     Every non-absolute command is checked with shutil.which (not an allowlist) —
     a bare name like `sql-buddy` or a typo must fail, not silently "resolve".
     Absolute / relative path commands are checked on the filesystem.
+
+    When `trae=True`, a command field containing spaces is a hard failure —
+    Trae's host rejects those configs (see docs.trae.ai add-mcp-servers).
     """
     if not isinstance(entry, dict):
         return False, f"entry must be an object, got {type(entry).__name__}"
@@ -328,10 +346,16 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
         return False, f"'args' must be a list, got {type(args).__name__}"
     if not cmd or not isinstance(cmd, str):
         return False, "no 'command' set"
+    # Trae: command must not contain spaces (host parse rule).
+    if trae and " " in cmd:
+        return False, (
+            f"command path contains spaces (Trae rejects this): {cmd} — "
+            "re-run: sql-buddy mcp add --client trae  after installing uv/python "
+            "on a path without spaces"
+        )
     if os.path.isabs(cmd) or os.sep in cmd or (os.altsep and os.altsep in cmd):
         # Absolute or relative filesystem path — must be a regular file.
-        # On Windows, X_OK is not meaningful for .exe resolution (PATHEXT);
-        # Trae also rejects a command field that contains spaces.
+        # On Windows, X_OK is not meaningful for .exe resolution (PATHEXT).
         if not os.path.isfile(cmd):
             return False, f"command path MISSING or not a file: {cmd}"
         # Unix: require +x. Windows: X_OK is not meaningful (PATHEXT); skip.
@@ -345,10 +369,7 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
                if isinstance(a, str) and os.path.isabs(a) and not os.path.exists(a)]
     if missing:
         return False, f"arg path(s) MISSING: {', '.join(missing)}"
-    detail = f"command '{cmd}' resolves"
-    if " " in cmd:
-        detail += " (note: spaces in command may break Trae)"
-    return True, detail
+    return True, f"command '{cmd}' resolves"
 
 
 def _check_mcp_config() -> list[tuple[str, bool, str]]:
@@ -358,8 +379,8 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
         if not os.path.exists(path):
             continue
         try:
-            with open(path) as f:
-                data = json.load(f)
+            # utf-8-sig: Trae / Windows editors may write a BOM.
+            data = _read_json_file(path)
         except Exception as e:
             rows.append((f"MCP config {path}", False, f"unreadable: {e}"))
             continue
@@ -373,6 +394,7 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
             rows.append((f"MCP config {path}", False,
                          f"'mcpServers' must be an object, got {type(servers).__name__}"))
             continue
+        trae = _is_trae_config_path(path)
         if "sql-buddy" in servers:
             found_any = True
             ent = servers["sql-buddy"]
@@ -380,7 +402,7 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
                 rows.append((f"MCP config {path} [sql-buddy]", False,
                              f"entry must be an object, got {type(ent).__name__}"))
             else:
-                ok, detail = _validate_mcp_entry(ent)
+                ok, detail = _validate_mcp_entry(ent, trae=trae)
                 rows.append((f"MCP config {path} [sql-buddy]", ok, detail))
         else:
             # Only treat an entry as sql-buddy if it is SQL-Buddy-specific —
@@ -391,7 +413,7 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
                 if not _looks_like_sql_buddy_entry(name, ent):
                     continue
                 found_any = True
-                ok, detail = _validate_mcp_entry(ent)
+                ok, detail = _validate_mcp_entry(ent, trae=trae)
                 rows.append((f"MCP config {path} [{name}]", ok, detail))
     if not found_any:
         rows.append(("MCP client config", False,
@@ -712,36 +734,26 @@ def _mcp_entry(python_mode: bool, *, project_relative: bool = False,
     `project_relative=True` writes `--directory .` so a checked-in `.mcp.json`
     in this repo stays portable and is not dirtied with a machine-specific path.
 
-    On Windows / Trae we resolve bare commands to absolute paths (GUI hosts often
-    lack the user's shell PATH) and avoid a `command` field containing spaces
-    (Trae rejects those).
+    On Windows / Trae we resolve bare `uv` to an absolute path (GUI hosts often
+    lack the user's shell PATH). We never substitute `py -3` for sys.executable:
+    that would drop the active venv and its deps. If Trae cannot accept the
+    command path (spaces), callers must refuse rather than guess another Python.
     """
     env = _mcp_env(client)
     server = _norm_mcp_path(_server_py())
 
     if python_mode:
+        # Always the invoking interpreter — keeps the active uv/.venv deps.
         cmd = _norm_mcp_path(sys.executable)
-        args = [server]
-        # Trae: "command must not contain spaces". Prefer the `py` launcher.
-        if client == "trae" and _command_has_spaces(cmd):
-            py = _resolve_exe("py")
-            if py and not _command_has_spaces(py):
-                cmd, args = py, ["-3", server]
-            else:
-                # Last resort — still emit, doctor will flag it.
-                pass
-        entry: dict = {"command": cmd, "args": args}
+        entry: dict = {"command": cmd, "args": [server]}
     else:
-        uv = _resolve_exe("uv") or "uv"
-        # GUI MCP hosts (Trae on Windows) often don't inherit shell PATH.
-        if uv == "uv" and sys.platform == "win32":
-            # keep bare name; doctor / add will have already preferred --python
-            # when uv is missing. If present only as bare name, leave it.
-            pass
+        # Absolute uv only where GUI hosts need it. Bare `uv` keeps Claude's
+        # checked-in .mcp.json portable on Unix.
+        if client == "trae" or sys.platform == "win32":
+            uv = _resolve_exe("uv") or "uv"
+        else:
+            uv = "uv"
         directory = "." if project_relative else _norm_mcp_path(_HERE)
-        if client == "trae" and _command_has_spaces(uv):
-            # Fall through to python mode shape with spaceless launcher.
-            return _mcp_entry(True, project_relative=False, client=client)
         entry = {
             "command": uv,
             "args": ["--directory", directory, "run", "server.py"],
@@ -749,6 +761,16 @@ def _mcp_entry(python_mode: bool, *, project_relative: bool = False,
     if env:
         entry["env"] = env
     return entry
+
+
+def _trae_command_space_error(cmd: str) -> str:
+    return (
+        f"refusing Trae config: command path contains spaces ({cmd!r}). "
+        "Trae's MCP host rejects a `command` field with spaces, and "
+        "substituting another Python (e.g. `py -3`) would drop this venv's "
+        "deps. Install uv (or move this checkout/venv) onto a path without "
+        "spaces, then re-run."
+    )
 
 
 def cmd_mcp_print(python_mode: bool, client: str = "claude") -> int:
@@ -766,9 +788,8 @@ def cmd_mcp_print(python_mode: bool, client: str = "claude") -> int:
     entry = _mcp_entry(python_mode, project_relative=rel and not python_mode,
                        client=client)
     if client == "trae" and _command_has_spaces(entry.get("command", "")):
-        print("# warning: command path contains spaces; Trae may reject it. "
-              "Install uv/python on a path without spaces, or use the `py` "
-              "launcher.\n", file=sys.stderr)
+        print(f"# warning: {_trae_command_space_error(entry.get('command', ''))}\n",
+              file=sys.stderr)
     print(json.dumps({"mcpServers": {"sql-buddy": entry}}, indent=2))
     return 0
 
@@ -877,11 +898,7 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
            and not python_mode)
     entry = _mcp_entry(python_mode, project_relative=rel, client=client)
     if client == "trae" and _command_has_spaces(entry.get("command", "")):
-        raise SystemExit(
-            f"refusing to write Trae config: command path contains spaces "
-            f"({entry.get('command')!r}). Install uv on a path without spaces, "
-            f"or ensure the Windows `py` launcher is on PATH, then re-run."
-        )
+        raise SystemExit(_trae_command_space_error(entry.get("command", "")))
     mode_note = "python (sys.executable)" if python_mode else (
         "uv relative (.)" if rel else "uv (auto-provisions venv)")
     if os.path.exists(path):
