@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sql-buddy": {
+      "command": "uv",
+      "args": ["--directory", ".", "run", "server.py"]
+    }
+  }
+}

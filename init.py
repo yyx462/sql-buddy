@@ -15,6 +15,7 @@ Run:  python init.py        (or, after `uv pip install -e .`:  sql-buddy-init)
 """
 
 import configparser
+import json
 import os
 import shutil
 import sys
@@ -188,6 +189,7 @@ def _write_external_template():
 # --- write ----------------------------------------------------------------
 
 def _backup_existing() -> str | None:
+    """Copy current db.ini to a 0600 backup next to it (gitignored as db.ini.bak*)."""
     if not os.path.exists(CONFIG_FILE):
         return None
     n = 1
@@ -195,6 +197,10 @@ def _backup_existing() -> str | None:
         n += 1
     bak = f"{CONFIG_FILE}.bak{n}"
     shutil.copy2(CONFIG_FILE, bak)
+    try:
+        os.chmod(bak, 0o600)
+    except OSError:
+        pass
     return bak
 
 
@@ -204,12 +210,44 @@ def _setup_auto():
     _add_connection_auto(cfg, block)
     while _yes_no("\nAdd another connection?", default=False):
         _add_connection_auto(cfg, block)
+    _write_cfg(cfg, "auto - self-managed SSH tunnels")
 
+
+def _write_cfg(cfg, mode_label: str):
+    """Back up any existing db.ini, then write `cfg` to CONFIG_FILE at mode 0600.
+
+    Shared by the interactive and non-interactive paths so they can never
+    drift in how they persist + verify. Mode 0600 so plaintext DB passwords
+    are never world-readable under a permissive umask.
+    """
+    import stat
+    import tempfile
     bak = _backup_existing()
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        cfg.write(f)
-    print(f"\nWrote {CONFIG_FILE}  (mode: auto - self-managed SSH tunnels)")
+    d = os.path.dirname(CONFIG_FILE)
+    os.makedirs(d, exist_ok=True)
+    # Preserve existing mode if already strict; otherwise force 0600.
+    mode = 0o600
+    if os.path.exists(CONFIG_FILE):
+        mode = stat.S_IMODE(os.stat(CONFIG_FILE).st_mode) | 0o600
+        # never widen beyond owner-only for a credential file
+        mode = mode & 0o700
+        if mode == 0:
+            mode = 0o600
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".db.ini.")
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w") as f:
+            cfg.write(f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CONFIG_FILE)
+        os.chmod(CONFIG_FILE, 0o600)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    print(f"\nWrote {CONFIG_FILE}  (mode: {mode_label}, perms 0600)")
     if bak:
         print(f"Previous config backed up to {bak}")
     print("\n" + _VERIFY_HINT)
@@ -229,7 +267,28 @@ def _setup_external():
     print("\n" + _VERIFY_HINT)
 
 
-def main():
+def main(argv: list[str] | None = None):
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="sql-buddy-init",
+        description="sql-buddy setup wizard — writes connections/config/db.ini",
+    )
+    parser.add_argument(
+        "--non-interactive", action="store_true",
+        help="write db.ini from a JSON spec without prompting (for agents / CI)",
+    )
+    # No --json '<inline>': argv is visible in process listings and shell/agent
+    # history, so credentials must never travel that way. Use stdin or a file.
+    parser.add_argument("--json-file", dest="json_file",
+                        help="path to a setup-spec JSON file (use '-' for stdin)")
+    parser.add_argument("--json-stdin", action="store_true",
+                        help="read the setup spec from stdin (preferred for secrets)")
+    args = parser.parse_args(argv)
+
+    if args.non_interactive:
+        _setup_non_interactive(_load_spec(args.json_file, args.json_stdin))
+        return 0
+
     print(
         "=== sql-buddy setup ===\n"
         f"Configures {CONFIG_FILE}"
@@ -239,6 +298,201 @@ def main():
         _setup_auto()
     else:
         _setup_external()
+    return 0
+
+
+# --- non-interactive spec -> db.ini ---------------------------------------
+# Driven by a JSON object so an agent (or CI) can produce db.ini without the
+# interactive prompts. Secrets stay local: they go straight from the spec into
+# db.ini, never echoed.
+#
+# Schema (auto mode):
+#   {"mode":"auto",
+#    "ssh": {"name":"prod","host":"...","port":22,"user":"...","key":"~/.ssh/...",
+#            "server_alive_interval":30,"server_alive_count_max":3},
+#    "connections":[{"name":"ck","type":"clickhouse",
+#                    "remote_host":"10.0.0.21","remote_port":9000,"local_port":10021,
+#                    "user":"ro","password":"...","database":"default"}]}
+#
+# Schema (external mode):
+#   {"mode":"external",
+#    "connections":[{"name":"ck","type":"clickhouse","host":"localhost","port":9000,
+#                    "user":"ro","password":"...","database":"default"}]}
+
+def _guess_type(name: str) -> str:
+    """Mirror the section-name inference used at query time (ck*->clickhouse, else mysql)."""
+    low = name.lower()
+    if low.startswith("ck"):
+        return "clickhouse"
+    if low.startswith(("db", "mysql")):
+        return "mysql"
+    return "mysql"
+
+
+_VALID_TYPES = frozenset({"clickhouse", "mysql", "mariadb"})
+
+
+def _require(d: dict, key: str, where: str, *, allow_empty: bool = False):
+    """Require a field. `allow_empty=True` permits '' (passwordless DB users)."""
+    if key not in d or d[key] is None:
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    if d[key] == "" and not allow_empty:
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    return d[key]
+
+
+def _require_port(d: dict, key: str, where: str, default=None) -> int:
+    """Require an integer port in 1..65535 (matches runtime int(port))."""
+    if key not in d or d[key] in (None, ""):
+        if default is not None:
+            return int(default)
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    try:
+        p = int(d[key])
+    except (TypeError, ValueError):
+        raise SystemExit(f"{where}: '{key}' must be an integer port, got {d[key]!r}")
+    if not (1 <= p <= 65535):
+        raise SystemExit(f"{where}: '{key}' must be 1..65535, got {p}")
+    return p
+
+
+def _resolve_type(conn: dict, name: str) -> str:
+    raw = conn.get("type")
+    if raw in (None, ""):
+        return _guess_type(name)
+    ctype = str(raw).strip().lower()
+    if ctype not in _VALID_TYPES:
+        raise SystemExit(
+            f"connection [{name}]: unsupported type '{ctype}' "
+            f"(want clickhouse|mysql|mariadb)"
+        )
+    return ctype
+
+
+def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
+    name = _require(conn, "name", "connection")
+    # Runtime skips every [ssh:*] section as a bastion block (case-insensitive).
+    if str(name).lower().startswith("ssh:"):
+        raise SystemExit(
+            f"connection name '{name}' is reserved (ssh:* sections are bastions, "
+            "not Connections)"
+        )
+    if cfg.has_section(name) or cfg.has_section(f"ssh:{name}"):
+        raise SystemExit(f"connection name '{name}' is duplicated or reserved")
+    cfg.add_section(name)
+    cfg.set(name, "type", _resolve_type(conn, name))
+    if auto_block is not None:
+        cfg.set(name, "tunnel", f"ssh:{auto_block}")
+        cfg.set(name, "remote_host",
+                str(_require(conn, "remote_host", f"connection [{name}]")))
+        cfg.set(name, "remote_port",
+                str(_require_port(conn, "remote_port", f"connection [{name}]")))
+        cfg.set(name, "local_port",
+                str(_require_port(conn, "local_port", f"connection [{name}]")))
+        cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
+        # Empty password is valid (passwordless local MySQL / some ClickHouse setups).
+        cfg.set(name, "password",
+                str(_require(conn, "password", f"connection [{name}]",
+                             allow_empty=True)))
+    else:
+        cfg.set(name, "host", str(_require(conn, "host", f"connection [{name}]")))
+        cfg.set(name, "port",
+                str(_require_port(conn, "port", f"connection [{name}]")))
+        cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
+        cfg.set(name, "password",
+                str(_require(conn, "password", f"connection [{name}]",
+                             allow_empty=True)))
+    if conn.get("database"):
+        cfg.set(name, "database", str(conn["database"]))
+
+
+def _cfg_from_auto_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
+    ssh = spec.get("ssh") or {}
+    block = ssh.get("name") or "prod"
+    section = f"ssh:{block}"
+    cfg = configparser.RawConfigParser()
+    cfg.add_section(section)
+    cfg.set(section, "host", str(_require(ssh, "host", "ssh")))
+    cfg.set(section, "port", str(_require_port(ssh, "port", "ssh", default=22)))
+    cfg.set(section, "user", str(_require(ssh, "user", "ssh")))
+    cfg.set(section, "key", str(_require(ssh, "key", "ssh")))
+    # keepalive is seconds (not a TCP port) — any non-negative / positive int.
+    if "server_alive_interval" in ssh:
+        try:
+            sai = int(ssh["server_alive_interval"])
+            if sai < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise SystemExit("ssh: server_alive_interval must be a non-negative integer")
+        cfg.set(section, "server_alive_interval", str(sai))
+    else:
+        cfg.set(section, "server_alive_interval", "30")
+    if "server_alive_count_max" in ssh:
+        try:
+            sac = int(ssh["server_alive_count_max"])
+            if sac < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise SystemExit("ssh: server_alive_count_max must be a positive integer")
+        cfg.set(section, "server_alive_count_max", str(sac))
+    else:
+        cfg.set(section, "server_alive_count_max", "3")
+    conns = spec.get("connections") or []
+    if not conns:
+        raise SystemExit("at least one connection is required")
+    for c in conns:
+        _add_conn_section(cfg, c, auto_block=block)
+    return cfg, "auto - self-managed SSH tunnels"
+
+
+def _cfg_from_external_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
+    cfg = configparser.RawConfigParser()
+    conns = spec.get("connections") or []
+    if not conns:
+        raise SystemExit("at least one connection is required")
+    for c in conns:
+        _add_conn_section(cfg, c, auto_block=None)
+    return cfg, "external"
+
+
+def _load_spec(json_file: str | None, json_stdin: bool) -> dict:
+    """Resolve the setup spec to a JSON object.
+
+    Secret-safe sources only (no inline argv JSON):
+      stdin (--json-stdin, or --json-file -) > protected file (--json-file)
+      > $SQL_BUDDY_SETUP_JSON env.
+    """
+    raw: str | None = None
+    if json_stdin or json_file == "-":
+        raw = sys.stdin.read()
+    elif json_file:
+        with open(os.path.expanduser(json_file)) as f:
+            raw = f.read()
+    elif os.environ.get("SQL_BUDDY_SETUP_JSON") is not None:
+        raw = os.environ.get("SQL_BUDDY_SETUP_JSON")
+    if raw is None:
+        raise SystemExit(
+            "--non-interactive needs one of: --json-stdin / --json-file <path|-> "
+            "/ $SQL_BUDDY_SETUP_JSON (credentials must not travel via argv)"
+        )
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"invalid setup JSON: {e}")
+    if not isinstance(spec, dict):
+        raise SystemExit("setup spec must be a JSON object")
+    return spec
+
+
+def _setup_non_interactive(spec: dict):
+    mode = (spec.get("mode") or "auto").lower()
+    if mode == "auto":
+        cfg, label = _cfg_from_auto_spec(spec)
+    elif mode == "external":
+        cfg, label = _cfg_from_external_spec(spec)
+    else:
+        raise SystemExit(f"unknown mode '{mode}' (want 'auto' or 'external')")
+    _write_cfg(cfg, label)
 
 
 if __name__ == "__main__":

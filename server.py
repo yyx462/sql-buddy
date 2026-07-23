@@ -254,5 +254,22 @@ def explain(sql: str, connection: str = DEFAULT_CONNECTION) -> str:
         return _error_json(e, connection)
 
 
-if __name__ == "__main__":
+def run_server():
+    """Run the MCP server over stdio (the normal operating mode).
+
+    Entry point for both `python server.py` and the `sql-buddy` console script
+    (via cli.main -> cli._run_server).
+    """
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    # Bare `python server.py` (or `python server.py serve`) starts the MCP
+    # server — the common case for MCP client configs. Any other subcommand
+    # (`doctor`, `mcp`, `version`, ...) is handed to the CLI dispatcher so
+    # `python server.py <cmd>` mirrors `sql-buddy <cmd>`.
+    _args = sys.argv[1:]
+    if _args and _args[0] not in ("serve", "server", "stdio"):
+        import cli
+        sys.exit(cli.main())
+    run_server()
