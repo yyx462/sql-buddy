@@ -598,21 +598,28 @@ def _server_py() -> str:
     return os.path.join(_HERE, "server.py")
 
 
-def _mcp_entry(python_mode: bool) -> dict:
+def _mcp_entry(python_mode: bool, *, project_relative: bool = False) -> dict:
     """Build the mcpServers['sql-buddy'] entry, paths auto-filled.
 
     Default (uv mode) uses `uv --directory <repo> run server.py` so the venv is
     auto-provisioned and there is no absolute .venv path to go stale. `--python`
     uses the interpreter currently running the CLI (sys.executable), which is
     the most robust absolute path when uv is unavailable.
+
+    `project_relative=True` writes `--directory .` so a checked-in `.mcp.json`
+    in this repo stays portable and is not dirtied with a machine-specific path.
     """
     if python_mode:
         return {"command": sys.executable, "args": [_server_py()]}
-    return {"command": "uv", "args": ["--directory", _HERE, "run", "server.py"]}
+    directory = "." if project_relative else _HERE
+    return {"command": "uv", "args": ["--directory", directory, "run", "server.py"]}
 
 
 def cmd_mcp_print(python_mode: bool) -> int:
-    entry = _mcp_entry(python_mode)
+    # Prefer relative form when printing from inside this checkout (matches
+    # the committed .mcp.json template).
+    rel = os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
+    entry = _mcp_entry(python_mode, project_relative=rel and not python_mode)
     if not python_mode and not shutil.which("uv"):
         print("# note: 'uv' not found on PATH; this config requires it. "
               "Use --python for a sys.executable-based config.\n",
@@ -664,10 +671,39 @@ def _client_config_path(client: str, scope: str) -> str:
     raise SystemExit(f"unsupported scope '{scope}' (use 'project' or 'user')")
 
 
+def _mcp_backup_path(path: str) -> str:
+    """Backup path OUTSIDE any git checkout (token-bearing client configs).
+
+    Project-scope `mcp add` may run inside an unrelated repository whose
+    .gitignore does not cover `.mcp.json.bak*`. Putting backups under
+    ~/.cache/sql-buddy/ keeps them out of every working tree.
+    """
+    import hashlib
+    cache = os.path.join(os.path.expanduser("~"), ".cache", "sql-buddy", "mcp-backups")
+    os.makedirs(cache, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(cache, 0o700)
+    except OSError:
+        pass
+    digest = hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:12]
+    base = os.path.basename(path)
+    n = 1
+    while True:
+        cand = os.path.join(cache, f"{base}.{digest}.bak{n}")
+        if not os.path.exists(cand):
+            return cand
+        n += 1
+
+
 def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
     path = _client_config_path(client, scope)
-    entry = _mcp_entry(python_mode)
-    mode_note = "python (sys.executable)" if python_mode else "uv (auto-provisions venv)"
+    # Keep the committed .mcp.json portable when adding from inside this checkout.
+    rel = (scope == "project"
+           and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
+           and not python_mode)
+    entry = _mcp_entry(python_mode, project_relative=rel)
+    mode_note = "python (sys.executable)" if python_mode else (
+        "uv relative (.)" if rel else "uv (auto-provisions venv)")
     if os.path.exists(path):
         try:
             data = _read_json_file(path)
@@ -676,12 +712,12 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
         except Exception as e:
             raise SystemExit(f"{path} exists but is not valid JSON ({e}); "
                              "fix or remove it first")
-        bak = path + ".bak"
-        i = 0
-        while os.path.exists(bak):
-            i += 1
-            bak = f"{path}.bak{i}"
+        bak = _mcp_backup_path(path)
         shutil.copy2(path, bak)
+        try:
+            os.chmod(bak, 0o600)
+        except OSError:
+            pass
         print(f"Backed up existing config to {bak}")
     else:
         data = {}

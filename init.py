@@ -189,6 +189,7 @@ def _write_external_template():
 # --- write ----------------------------------------------------------------
 
 def _backup_existing() -> str | None:
+    """Copy current db.ini to a 0600 backup next to it (gitignored as db.ini.bak*)."""
     if not os.path.exists(CONFIG_FILE):
         return None
     n = 1
@@ -196,6 +197,10 @@ def _backup_existing() -> str | None:
         n += 1
     bak = f"{CONFIG_FILE}.bak{n}"
     shutil.copy2(CONFIG_FILE, bak)
+    try:
+        os.chmod(bak, 0o600)
+    except OSError:
+        pass
     return bak
 
 
@@ -209,16 +214,40 @@ def _setup_auto():
 
 
 def _write_cfg(cfg, mode_label: str):
-    """Back up any existing db.ini, then write `cfg` to CONFIG_FILE.
+    """Back up any existing db.ini, then write `cfg` to CONFIG_FILE at mode 0600.
 
     Shared by the interactive and non-interactive paths so they can never
-    drift in how they persist + verify.
+    drift in how they persist + verify. Mode 0600 so plaintext DB passwords
+    are never world-readable under a permissive umask.
     """
+    import stat
+    import tempfile
     bak = _backup_existing()
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        cfg.write(f)
-    print(f"\nWrote {CONFIG_FILE}  (mode: {mode_label})")
+    d = os.path.dirname(CONFIG_FILE)
+    os.makedirs(d, exist_ok=True)
+    # Preserve existing mode if already strict; otherwise force 0600.
+    mode = 0o600
+    if os.path.exists(CONFIG_FILE):
+        mode = stat.S_IMODE(os.stat(CONFIG_FILE).st_mode) | 0o600
+        # never widen beyond owner-only for a credential file
+        mode = mode & 0o700
+        if mode == 0:
+            mode = 0o600
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".db.ini.")
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w") as f:
+            cfg.write(f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CONFIG_FILE)
+        os.chmod(CONFIG_FILE, 0o600)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    print(f"\nWrote {CONFIG_FILE}  (mode: {mode_label}, perms 0600)")
     if bak:
         print(f"Previous config backed up to {bak}")
     print("\n" + _VERIFY_HINT)

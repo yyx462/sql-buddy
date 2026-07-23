@@ -98,7 +98,7 @@ This also gives you the `sql-buddy` command (run via `uv run sql-buddy …` or
 |---------|--------------|
 | `sql-buddy version` | Print the installed version. |
 | `sql-buddy doctor` | Validate the install: venv, `db.ini`, and MCP client config. Add `--connect` to also ping each Connection (`SELECT 1`). |
-| `sql-buddy init` | Interactive setup wizard (writes `db.ini`). Accepts `--non-interactive --json` for agents/CI. |
+| `sql-buddy init` | Interactive setup wizard (writes `db.ini`). Agents/CI: `--non-interactive --json-stdin` or `--json-file`. |
 | `sql-buddy mcp print` | Print the MCP client config block (paths filled in). `--python` for a `sys.executable`-based config. |
 | `sql-buddy mcp add` | Write that block straight into Claude Code's config (`.mcp.json` or `~/.claude.json`). |
 | `sql-buddy update-check` | Compare your checkout to the git remote; tells you when to `git pull`. |
@@ -503,7 +503,7 @@ cli.py                                # `sql-buddy` CLI: doctor / mcp / version 
 db_query.py                           # query logic
 db_security.py                        # secret-redaction + .env loader (installed at startup)
 tunnel.py                             # self-managed SSH tunnels (one ssh -N per [ssh:*] block)
-init.py                               # setup wizard — interactive, or --non-interactive --json
+init.py                               # setup wizard — interactive, or --non-interactive --json-stdin
 _version.py                           # single source of truth for the version
 ```
 
