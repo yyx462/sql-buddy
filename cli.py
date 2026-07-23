@@ -154,7 +154,8 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
         tunneled = cfg.has_option(name, "tunnel") and cfg.get(name, "tunnel", fallback="").strip()
         issues = []
         ctype = cfg.get(name, "type", fallback="").strip().lower()
-        if ctype and ctype not in ("clickhouse", "mysql"):
+        # manager.py treats 'mariadb' as a mysql alias — accept it here too.
+        if ctype and ctype not in ("clickhouse", "mysql", "mariadb"):
             issues.append(f"unknown type '{ctype}'")
         if tunneled:
             block = tunneled[4:] if tunneled.startswith("ssh:") else tunneled

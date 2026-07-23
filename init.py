@@ -363,17 +363,19 @@ def _load_spec(json_str: str | None, json_file: str | None, json_stdin: bool) ->
     file (--json-file) > $SQL_BUDDY_SETUP_JSON env > inline --json string.
     Inline --json is allowed for convenience/testing but discouraged for
     credentials, since argv is visible in process listings and shell history.
+    A credentials-bearing --json-file must never be silently overridden by an
+    argv-visible --json string, so file wins over inline.
     """
     raw: str | None = None
     if json_stdin or json_file == "-":
         raw = sys.stdin.read()
-    elif json_str is not None:
-        raw = json_str
     elif json_file:
         with open(os.path.expanduser(json_file)) as f:
             raw = f.read()
-    else:
+    elif os.environ.get("SQL_BUDDY_SETUP_JSON") is not None:
         raw = os.environ.get("SQL_BUDDY_SETUP_JSON")
+    elif json_str is not None:
+        raw = json_str
     if raw is None:
         raise SystemExit(
             "--non-interactive needs one of: --json-stdin / --json-file <path|-> "
