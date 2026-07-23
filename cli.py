@@ -142,8 +142,41 @@ def _connection_names(cfg) -> list[str]:
     return [s for s in cfg.sections() if not s.lower().startswith("ssh:")]
 
 
+_VALID_TYPES = frozenset({"clickhouse", "mysql", "mariadb"})
+
+
+def _port_ok(raw: str) -> bool:
+    """True if raw is an integer port in 1..65535 (runtime does int(port))."""
+    try:
+        p = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return False
+    return 1 <= p <= 65535
+
+
+def _resolve_type_like_runtime(cfg, name: str) -> tuple[str | None, str | None]:
+    """Mirror connections.manager.connection_type (without importing manager).
+
+    Returns (ctype, error). error is set when runtime would raise ValueError
+    (no explicit type and name prefix doesn't match ck*/db*/mysql*).
+    """
+    explicit = cfg.get(name, "type", fallback="").strip().lower()
+    if explicit:
+        if explicit not in _VALID_TYPES:
+            return None, f"unknown type '{explicit}' (want clickhouse|mysql|mariadb)"
+        return explicit, None
+    if name.startswith("ck"):
+        return "clickhouse", None
+    if name.startswith("db") or name.startswith("mysql"):
+        return "mysql", None
+    return None, "missing type (set type=clickhouse|mysql, or name the section ck*/db*/mysql*)"
+
+
 def _check_config(cfg) -> list[tuple[str, bool, str]]:
-    """Static validation of db.ini shape. Returns (label, ok, detail) rows."""
+    """Static validation of db.ini shape. Returns (label, ok, detail) rows.
+
+    Mirrors runtime rules: connection_type() resolution + int(port) conversion.
+    """
     rows: list[tuple[str, bool, str]] = []
     conns = _connection_names(cfg)
     if not conns:
@@ -153,10 +186,9 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
     for name in conns:
         tunneled = cfg.has_option(name, "tunnel") and cfg.get(name, "tunnel", fallback="").strip()
         issues = []
-        ctype = cfg.get(name, "type", fallback="").strip().lower()
-        # manager.py treats 'mariadb' as a mysql alias — accept it here too.
-        if ctype and ctype not in ("clickhouse", "mysql", "mariadb"):
-            issues.append(f"unknown type '{ctype}'")
+        ctype, type_err = _resolve_type_like_runtime(cfg, name)
+        if type_err:
+            issues.append(type_err)
         if tunneled:
             block = tunneled[4:] if tunneled.startswith("ssh:") else tunneled
             if f"ssh:{block}" not in cfg.sections():
@@ -164,10 +196,15 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
             for req in ("remote_host", "remote_port", "local_port"):
                 if not cfg.has_option(name, req):
                     issues.append(f"missing {req}")
+            for pkey in ("remote_port", "local_port"):
+                if cfg.has_option(name, pkey) and not _port_ok(cfg.get(name, pkey)):
+                    issues.append(f"{pkey} must be integer 1..65535")
         else:
             for req in ("host", "port"):
                 if not cfg.has_option(name, req):
                     issues.append(f"missing {req}")
+            if cfg.has_option(name, "port") and not _port_ok(cfg.get(name, "port")):
+                issues.append("port must be integer 1..65535")
         if not cfg.has_option(name, "user"):
             issues.append("missing user")
         detail = ", ".join(issues) if issues else (
@@ -178,6 +215,8 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
         for req in ("host", "user", "key"):
             if not cfg.has_option(block, req):
                 rows.append((f"bastion [{block}]", False, f"missing {req}"))
+        if cfg.has_option(block, "port") and not _port_ok(cfg.get(block, "port")):
+            rows.append((f"bastion [{block}]", False, "port must be integer 1..65535"))
     return rows
 
 
@@ -206,8 +245,14 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
     a bare name like `sql-buddy` or a typo must fail, not silently "resolve".
     Absolute / relative path commands are checked on the filesystem.
     """
+    if not isinstance(entry, dict):
+        return False, f"entry must be an object, got {type(entry).__name__}"
     cmd = entry.get("command")
-    args = entry.get("args") or []
+    args = entry.get("args", [])
+    if args is None:
+        args = []
+    if not isinstance(args, list):
+        return False, f"'args' must be a list, got {type(args).__name__}"
     if not cmd or not isinstance(cmd, str):
         return False, "no 'command' set"
     if os.path.isabs(cmd) or os.sep in cmd or (os.altsep and os.altsep in cmd):
@@ -237,14 +282,30 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
         except Exception as e:
             rows.append((f"MCP config {path}", False, f"unreadable: {e}"))
             continue
-        servers = data.get("mcpServers", {}) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            rows.append((f"MCP config {path}", False, "top-level JSON is not an object"))
+            continue
+        servers = data.get("mcpServers", {})
+        if servers is None:
+            servers = {}
+        if not isinstance(servers, dict):
+            rows.append((f"MCP config {path}", False,
+                         f"'mcpServers' must be an object, got {type(servers).__name__}"))
+            continue
         if "sql-buddy" in servers:
             found_any = True
-            ok, detail = _validate_mcp_entry(servers["sql-buddy"])
-            rows.append((f"MCP config {path} [sql-buddy]", ok, detail))
+            ent = servers["sql-buddy"]
+            if not isinstance(ent, dict):
+                rows.append((f"MCP config {path} [sql-buddy]", False,
+                             f"entry must be an object, got {type(ent).__name__}"))
+            else:
+                ok, detail = _validate_mcp_entry(ent)
+                rows.append((f"MCP config {path} [sql-buddy]", ok, detail))
         else:
             # also detect a server whose args mention server.py / sql-buddy
             for name, ent in servers.items():
+                if not isinstance(ent, dict):
+                    continue
                 blob = json.dumps(ent).lower()
                 if "sql-buddy" in blob or "server.py" in blob:
                     found_any = True
@@ -359,10 +420,27 @@ def doctor(connect: bool = False) -> int:
 # update-check
 # ---------------------------------------------------------------------------
 
+def _redact_secrets(text: str) -> str:
+    """Strip credential-bearing URL userinfo (and similar) from diagnostic text.
+
+    Git stderr often embeds the remote URL; if the remote is an HTTPS URL with
+    an embedded token (`https://user:TOKEN@host/...`), echoing raw stderr would
+    leak it. Replace userinfo with `***`.
+    """
+    if not text:
+        return text
+    import re
+    # https://user:pass@host  or  https://token@host
+    text = re.sub(r"(https?://)([^/@\s]+)@", r"\1***@", text)
+    # ssh-style with embedded password is rare; still strip user:pass@host
+    text = re.sub(r"(\b)([^:\s/]+):([^@\s/]+)@", r"\1***@", text)
+    return text
+
+
 def _git(args: list[str], cwd: str = _HERE) -> tuple[int, str, str]:
     try:
         p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        return p.returncode, p.stdout.strip(), _redact_secrets(p.stderr.strip())
     except FileNotFoundError:
         return 127, "", "git not installed"
 
@@ -612,17 +690,21 @@ def main(argv: list[str] | None = None) -> int:
         return init.main(rest) or 0
     if cmd == "mcp":
         if not rest:
-            print("Usage: sql-buddy mcp <print|add> [...]", file=sys.stderr)
+            print("Usage: sql-buddy mcp <print|add> [--python] "
+                  "[--client claude] [--scope project|user]", file=sys.stderr)
             return 2
         sub = rest[0]
         flags = rest[1:]
-        python_mode = "--python" in flags
+        try:
+            parsed = _parse_mcp_flags(flags)
+        except SystemExit as e:
+            print(str(e) or "bad flags", file=sys.stderr)
+            return 2
         if sub == "print":
-            return cmd_mcp_print(python_mode)
+            return cmd_mcp_print(parsed["python"])
         if sub == "add":
-            client = _flag_value(flags, "--client", default="claude")
-            scope = _flag_value(flags, "--scope", default="project")
-            return cmd_mcp_add(python_mode, client=client, scope=scope)
+            return cmd_mcp_add(parsed["python"],
+                               client=parsed["client"], scope=parsed["scope"])
         print(f"Unknown 'mcp' subcommand: {sub} (want print|add)", file=sys.stderr)
         return 2
 
@@ -631,14 +713,39 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _flag_value(flags: list[str], name: str, default: str | None = None) -> str | None:
-    """Parse `--name value` or `--name=value` from a flat flag list."""
-    for i, f in enumerate(flags):
-        if f == name and i + 1 < len(flags):
-            return flags[i + 1]
-        if f.startswith(name + "="):
-            return f.split("=", 1)[1]
-    return default
+def _parse_mcp_flags(flags: list[str]) -> dict:
+    """Strict flag parser for `mcp print|add`. Unknown / valueless flags error."""
+    out = {"python": False, "client": "claude", "scope": "project"}
+    known = {"--python", "--client", "--scope"}
+    i = 0
+    while i < len(flags):
+        f = flags[i]
+        if f == "--python":
+            out["python"] = True
+            i += 1
+            continue
+        if f.startswith("--client=") or f.startswith("--scope="):
+            name, _, val = f.partition("=")
+            key = name[2:]  # strip --
+            if not val:
+                raise SystemExit(f"{name} requires a value")
+            out[key] = val
+            i += 1
+            continue
+        if f in ("--client", "--scope"):
+            if i + 1 >= len(flags) or flags[i + 1].startswith("-"):
+                raise SystemExit(f"{f} requires a value (got end of args)")
+            out[f[2:]] = flags[i + 1]
+            i += 2
+            continue
+        if f.startswith("-"):
+            raise SystemExit(f"unknown flag: {f} (want {', '.join(sorted(known))})")
+        raise SystemExit(f"unexpected argument: {f}")
+    if out["scope"] not in ("project", "user"):
+        raise SystemExit(f"unsupported --scope '{out['scope']}' (want project|user)")
+    if out["client"] != "claude":
+        raise SystemExit(f"unsupported --client '{out['client']}' (only 'claude' for now)")
+    return out
 
 
 if __name__ == "__main__":

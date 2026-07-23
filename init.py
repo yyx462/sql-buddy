@@ -303,10 +303,41 @@ def _guess_type(name: str) -> str:
     return "mysql"
 
 
+_VALID_TYPES = frozenset({"clickhouse", "mysql", "mariadb"})
+
+
 def _require(d: dict, key: str, where: str):
     if key not in d or d[key] in (None, ""):
         raise SystemExit(f"{where}: missing required field '{key}'")
     return d[key]
+
+
+def _require_port(d: dict, key: str, where: str, default=None) -> int:
+    """Require an integer port in 1..65535 (matches runtime int(port))."""
+    if key not in d or d[key] in (None, ""):
+        if default is not None:
+            return int(default)
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    try:
+        p = int(d[key])
+    except (TypeError, ValueError):
+        raise SystemExit(f"{where}: '{key}' must be an integer port, got {d[key]!r}")
+    if not (1 <= p <= 65535):
+        raise SystemExit(f"{where}: '{key}' must be 1..65535, got {p}")
+    return p
+
+
+def _resolve_type(conn: dict, name: str) -> str:
+    raw = conn.get("type")
+    if raw in (None, ""):
+        return _guess_type(name)
+    ctype = str(raw).strip().lower()
+    if ctype not in _VALID_TYPES:
+        raise SystemExit(
+            f"connection [{name}]: unsupported type '{ctype}' "
+            f"(want clickhouse|mysql|mariadb)"
+        )
+    return ctype
 
 
 def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
@@ -314,14 +345,25 @@ def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
     if cfg.has_section(name) or cfg.has_section(f"ssh:{name}"):
         raise SystemExit(f"connection name '{name}' is duplicated or reserved")
     cfg.add_section(name)
-    cfg.set(name, "type", str(conn.get("type") or _guess_type(name)))
+    cfg.set(name, "type", _resolve_type(conn, name))
     if auto_block is not None:
         cfg.set(name, "tunnel", f"ssh:{auto_block}")
-        for k in ("remote_host", "remote_port", "local_port", "user", "password"):
-            cfg.set(name, k, str(_require(conn, k, f"connection [{name}]")))
+        cfg.set(name, "remote_host",
+                str(_require(conn, "remote_host", f"connection [{name}]")))
+        cfg.set(name, "remote_port",
+                str(_require_port(conn, "remote_port", f"connection [{name}]")))
+        cfg.set(name, "local_port",
+                str(_require_port(conn, "local_port", f"connection [{name}]")))
+        cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
+        cfg.set(name, "password",
+                str(_require(conn, "password", f"connection [{name}]")))
     else:
-        for k in ("host", "port", "user", "password"):
-            cfg.set(name, k, str(_require(conn, k, f"connection [{name}]")))
+        cfg.set(name, "host", str(_require(conn, "host", f"connection [{name}]")))
+        cfg.set(name, "port",
+                str(_require_port(conn, "port", f"connection [{name}]")))
+        cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
+        cfg.set(name, "password",
+                str(_require(conn, "password", f"connection [{name}]")))
     if conn.get("database"):
         cfg.set(name, "database", str(conn["database"]))
 
@@ -333,11 +375,30 @@ def _cfg_from_auto_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
     cfg = configparser.RawConfigParser()
     cfg.add_section(section)
     cfg.set(section, "host", str(_require(ssh, "host", "ssh")))
-    cfg.set(section, "port", str(ssh.get("port", 22)))
+    cfg.set(section, "port", str(_require_port(ssh, "port", "ssh", default=22)))
     cfg.set(section, "user", str(_require(ssh, "user", "ssh")))
     cfg.set(section, "key", str(_require(ssh, "key", "ssh")))
-    cfg.set(section, "server_alive_interval", str(ssh.get("server_alive_interval", 30)))
-    cfg.set(section, "server_alive_count_max", str(ssh.get("server_alive_count_max", 3)))
+    # keepalive is seconds (not a TCP port) — any non-negative / positive int.
+    if "server_alive_interval" in ssh:
+        try:
+            sai = int(ssh["server_alive_interval"])
+            if sai < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise SystemExit("ssh: server_alive_interval must be a non-negative integer")
+        cfg.set(section, "server_alive_interval", str(sai))
+    else:
+        cfg.set(section, "server_alive_interval", "30")
+    if "server_alive_count_max" in ssh:
+        try:
+            sac = int(ssh["server_alive_count_max"])
+            if sac < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise SystemExit("ssh: server_alive_count_max must be a positive integer")
+        cfg.set(section, "server_alive_count_max", str(sac))
+    else:
+        cfg.set(section, "server_alive_count_max", "3")
     conns = spec.get("connections") or []
     if not conns:
         raise SystemExit("at least one connection is required")
