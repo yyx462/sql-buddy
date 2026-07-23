@@ -864,7 +864,7 @@ wheels = [
 
 [[package]]
 name = "sql-buddy"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "clickhouse-driver" },

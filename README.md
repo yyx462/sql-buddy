@@ -46,6 +46,8 @@ Then configure your Connections and validate everything in one shot:
 uv run sql-buddy init       # interactive wizard → writes connections/config/db.ini
 uv run sql-buddy doctor     # green-checks the venv, db.ini, and MCP client config
 uv run sql-buddy mcp add    # registers sql-buddy with Claude Code (writes .mcp.json)
+# Windows + Trae IDE:
+#   uv run sql-buddy mcp add --client trae --scope user
 ```
 
 `uv run sql-buddy <command>` runs from anywhere inside the checkout (from
@@ -54,6 +56,10 @@ the venv's `sql-buddy` directly). Subcommands: `version`, `doctor [--connect]`,
 `mcp print|add`, `update-check`, `init`. **Bare `sql-buddy` (no command) runs the
 MCP server** — that's what your AI client invokes, so MCP client configs hold no
 fragile absolute path to `.venv/bin/python`.
+
+On **Windows**, use PowerShell (or cmd) the same way — `uv` and `sql-buddy`
+are `.exe` shims. Prefer [Trae](#windows--trae-ide) / Claude with
+`mcp add --client …`. See [Windows & Trae IDE](#windows--trae-ide) below.
 
 New here? Walk through the full [Setup](#setup) below.
 
@@ -72,7 +78,10 @@ You will need:
    - for each database, the DB `host:port` **as seen from the bastion** (private internal
      IPs like `10.0.0.x`, not your laptop's view).
 4. **Read-only database credentials** - ask your DBA for a user that can `SELECT` but not write.
-5. An **MCP-compatible client** to connect it to (e.g. Claude Code).
+5. An **MCP-compatible client** to connect it to (e.g. Claude Code, **Trae**).
+6. **Windows only (Auto tunnels):** [OpenSSH Client](https://learn.microsoft.com/windows-server/administration/openssh/openssh_install_firstuse)
+   — Settings → Apps → Optional features → OpenSSH Client. Skip if you use
+   **External** mode (`ssh -N` in another terminal).
 
 ---
 
@@ -99,8 +108,8 @@ This also gives you the `sql-buddy` command (run via `uv run sql-buddy …` or
 | `sql-buddy version` | Print the installed version. |
 | `sql-buddy doctor` | Validate the install: venv, `db.ini`, and MCP client config. Add `--connect` to also ping each Connection (`SELECT 1`). |
 | `sql-buddy init` | Interactive setup wizard (writes `db.ini`). Agents/CI: `--non-interactive --json-stdin` or `--json-file`. |
-| `sql-buddy mcp print` | Print the MCP client config block (paths filled in). `--python` for a `sys.executable`-based config. |
-| `sql-buddy mcp add` | Write that block straight into Claude Code's config (`.mcp.json` or `~/.claude.json`). |
+| `sql-buddy mcp print` | Print the MCP client config block (paths filled in). `--python` for a `sys.executable`-based config. `--client claude\|trae`. |
+| `sql-buddy mcp add` | Write that block into a client config. `--client claude` (default) or `trae`; `--scope project\|user`. |
 | `sql-buddy update-check` | Compare your checkout to the git remote; tells you when to `git pull`. |
 
 > Prefer plain pip, or need the explicit venv?
@@ -108,6 +117,7 @@ This also gives you the `sql-buddy` command (run via `uv run sql-buddy …` or
 > python3.11 -m venv .venv && source .venv/bin/activate && pip install -e .
 > # or with uv:  uv venv .venv --python 3.11 && uv pip install -e .
 > .venv/bin/sql-buddy doctor   # then use .venv/bin/sql-buddy / .venv/bin/python server.py
+> # Windows:     .venv\Scripts\sql-buddy.exe doctor
 > ```
 
 ---
@@ -306,14 +316,17 @@ export SQL_BUDDY_DEFAULT_CONNECTION=ck
 Easiest: let sql-buddy write the config for you.
 
 ```bash
-uv run sql-buddy mcp add                 # project scope → writes ./.mcp.json (Claude Code)
-uv run sql-buddy mcp add --scope user    # user scope   → writes ~/.claude.json
+uv run sql-buddy mcp add                      # Claude Code project → ./.mcp.json
+uv run sql-buddy mcp add --scope user         # Claude Code user    → ~/.claude.json
+uv run sql-buddy mcp add --client trae        # Trae project        → ./.trae/mcp.json
+uv run sql-buddy mcp add --client trae --scope user   # Trae user-global
 ```
 
 Restart your client and you're done. Preview the exact block first with
-`uv run sql-buddy mcp print`. It produces this (paths filled in for you) — the
-**`uv --directory … run`** form auto-provisions the venv and carries no absolute
-`.venv/bin/python` path to go stale:
+`uv run sql-buddy mcp print` (add `--client trae` for Trae-shaped env/timeouts).
+It produces this (paths filled in for you) — the **`uv --directory … run`** form
+auto-provisions the venv and carries no absolute `.venv/bin/python` path to go
+stale:
 
 ```json
 {
@@ -332,6 +345,105 @@ Restart your client and you're done. Preview the exact block first with
 
 Ask your agent something like *"list the tables in the `ck` connection"* - if it
 can answer, you're live. 🎉
+
+---
+
+## Windows & Trae IDE
+
+Coworkers on **Windows + [Trae](https://www.trae.ai/)** (or Trae CN) should use
+this path — Trae’s MCP host is pickier than a shell about PATH, spaces in the
+`command` field, and cold-start timeouts.
+
+### One-time machine setup
+
+1. **Install [uv](https://docs.astral.sh/uv/)** (recommended) in a path **without
+   spaces** (default user install is fine):
+   ```powershell
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+   Close and reopen the terminal so `uv` is on PATH. Confirm: `uv --version`.
+2. **Python 3.11+** if you prefer `--python` mode (`py --version` / python.org).
+3. **OpenSSH Client** only if you want **Auto** tunnels:
+   Settings → Apps → Optional features → **OpenSSH Client**.
+   Many Windows users keep an `ssh -N …` window open instead (**External** mode).
+4. Clone and smoke-test:
+   ```powershell
+   git clone <this-repo-url> sql-buddy
+   cd sql-buddy
+   uv run server.py          # Ctrl+C once it stays quiet
+   uv run sql-buddy init
+   uv run sql-buddy doctor
+   ```
+
+### Wire Trae
+
+```powershell
+# User-global (available in every Trae window):
+uv run sql-buddy mcp add --client trae --scope user
+
+# Or project-only (writes .trae/mcp.json next to the workspace you have open):
+uv run sql-buddy mcp add --client trae
+# Then in Trae: Settings → MCP → enable "project-level MCP"
+```
+
+What gets written (paths filled in; Trae also gets longer start/run timeouts and
+UTF-8 env so JSON-RPC survives Chinese Windows code pages):
+
+```json
+{
+  "mcpServers": {
+    "sql-buddy": {
+      "command": "C:\\Users\\you\\.local\\bin\\uv.exe",
+      "args": ["--directory", "D:\\src\\sql-buddy", "run", "server.py"],
+      "env": {
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "START_MCP_TIMEOUT_MS": "120000",
+        "RUN_MCP_TIMEOUT_MS": "120000"
+      }
+    }
+  }
+}
+```
+
+Fully restart Trae (not just reload window). Check **Settings → MCP** — sql-buddy
+should show green. If it fails, open **Output → MCP Server Host**
+(`Ctrl+Shift+U`) for the spawn log.
+
+### Windows gotchas we already handle
+
+| Symptom | Fix / what sql-buddy does |
+|--------|---------------------------|
+| Trae can’t find `uv` | `mcp add` resolves `uv` to an **absolute** `.exe` path; falls back to `sys.executable` if `uv` is missing |
+| `command` contains spaces (Trae rejects it) | Prefers the `py` launcher or refuses to write a broken Trae config |
+| First start times out | Trae entries set `START_MCP_TIMEOUT_MS=120000` (venv provision is slow once) |
+| Garbled errors / JSON parse fails on CN Windows | Sets `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` |
+| Flashing black console when a tunnel opens | SSH subprocess uses `CREATE_NO_WINDOW` |
+| `ssh` missing in Auto mode | `doctor` tells you to install OpenSSH Client |
+| Key path `~\.ssh\id_ed25519` | Expanded + normalized on write and at tunnel start |
+| `db.ini` encoding (GBK editors) | Reader accepts UTF-8 BOM / UTF-8 / GBK / mbcs |
+
+### External tunnel on Windows (common)
+
+If Auto SSH is awkward, run the tunnel yourself and point sql-buddy at localhost:
+
+```powershell
+# keep this window open
+ssh -N -L 127.0.0.1:10021:10.0.0.21:9000 -p 22222 user@bastion -i $HOME\.ssh\id_ed25519
+```
+
+```ini
+# connections/config/db.ini  (External — no tunnel= key)
+[ck]
+type     = clickhouse
+host     = localhost
+port     = 10021
+user     = readonly
+password = ...
+database = default
+```
+
+Then `uv run sql-buddy doctor --connect`.
 
 ---
 
@@ -444,8 +556,10 @@ value below. Ask the user explicitly, one at a time, in plain language.
 8. **Register the MCP server** with one command — it writes the `uv --directory … run`
    config straight into the client (no absolute `.venv/bin/python` path to verify):
    ```bash
-   uv run sql-buddy mcp add --scope user     # ~/.claude.json (user-global)
-   # or, for a single project:  uv run sql-buddy mcp add   # → ./.mcp.json
+    uv run sql-buddy mcp add --scope user     # ~/.claude.json (user-global)
+    # or, for a single project:  uv run sql-buddy mcp add   # → ./.mcp.json
+    # Windows + Trae:
+    #   uv run sql-buddy mcp add --client trae --scope user
    uv run sql-buddy mcp print                 # preview the exact block first if you like
    ```
    Then tell the user to restart their MCP client.

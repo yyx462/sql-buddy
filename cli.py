@@ -9,7 +9,7 @@ Subcommands:
   doctor [--connect]       validate install + db.ini (+ live pings if --connect)
   update-check             compare local checkout to the git remote
   mcp print [--python]     print the MCP client config block (paths filled in)
-  mcp add [--client claude] [--scope project|user] [--python]
+  mcp add [--client claude|trae] [--scope project|user] [--python]
                            write the config block into a client's config file
   init                     run the interactive setup wizard
   help | --help | -h       show usage
@@ -111,9 +111,14 @@ def _check_ssh(needed: bool) -> tuple[str, str, str]:
     if path:
         return "ssh binary", "ok", f"on PATH: {path}"
     if needed:
+        hint = (
+            "install OpenSSH Client (Windows Settings → Apps → Optional features)"
+            if sys.platform == "win32"
+            else "install an OpenSSH client (e.g. openssh-client)"
+        )
         return ("ssh binary", "fail",
                 "NOT on PATH but a connection uses a self-managed tunnel "
-                "(Auto mode); install an OpenSSH client")
+                f"(Auto mode); {hint}")
     return ("ssh binary", "warn",
             "not on PATH (only needed for Auto-mode tunnels — fine for "
             "External/direct-only setups)")
@@ -245,21 +250,64 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
     return rows
 
 
+def _trae_user_mcp_candidates() -> list[str]:
+    """Likely Trae user-scope mcp.json locations (first existing wins for write).
+
+    Project-scope is always `<cwd>/.trae/mcp.json` (official Trae docs).
+    User-scope is not fully documented; Trae is VS Code-based so we probe the
+    standard User/ folder plus a ~/.trae fallback used by some installs.
+    """
+    home = os.path.expanduser("~")
+    names = ("Trae", "Trae CN", "Trae-CN", "trae")
+    out: list[str] = []
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA") or os.path.join(
+            home, "AppData", "Roaming")
+        for name in names:
+            out.append(os.path.join(appdata, name, "User", "mcp.json"))
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+        for name in names:
+            out.append(os.path.join(base, name, "User", "mcp.json"))
+    else:
+        for name in names:
+            out.append(os.path.join(home, ".config", name, "User", "mcp.json"))
+    out.append(os.path.join(home, ".trae", "mcp.json"))
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for p in out:
+        key = os.path.normcase(os.path.normpath(p))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
+
+
 def _mcp_candidate_files() -> list[str]:
     home = os.path.expanduser("~")
     cands = [
         os.path.join(os.getcwd(), ".mcp.json"),
+        os.path.join(os.getcwd(), ".trae", "mcp.json"),
         os.path.join(os.getcwd(), ".claude", "settings.json"),
         os.path.join(home, ".claude.json"),
     ]
+    cands.extend(_trae_user_mcp_candidates())
     if sys.platform == "darwin":
         cands.append(os.path.join(home, "Library", "Application Support",
                                   "Claude", "claude_desktop_config.json"))
     if sys.platform == "win32":
-        appdata = os.environ.get("AppData")
+        appdata = os.environ.get("APPDATA") or os.environ.get("AppData")
         if appdata:
-            cands.append(os.path.join(appdata, "Claude", "claude_desktop_config.json"))
-    return cands
+            cands.append(os.path.join(appdata, "Claude",
+                                      "claude_desktop_config.json"))
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for p in cands:
+        key = os.path.normcase(os.path.normpath(p))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
 
 
 def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
@@ -281,11 +329,13 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
     if not cmd or not isinstance(cmd, str):
         return False, "no 'command' set"
     if os.path.isabs(cmd) or os.sep in cmd or (os.altsep and os.altsep in cmd):
-        # Absolute or relative filesystem path — must be a regular executable file
-        # (a directory or non-executable file is not runnable by the MCP client).
+        # Absolute or relative filesystem path — must be a regular file.
+        # On Windows, X_OK is not meaningful for .exe resolution (PATHEXT);
+        # Trae also rejects a command field that contains spaces.
         if not os.path.isfile(cmd):
             return False, f"command path MISSING or not a file: {cmd}"
-        if not os.access(cmd, os.X_OK):
+        # Unix: require +x. Windows: X_OK is not meaningful (PATHEXT); skip.
+        if sys.platform != "win32" and not os.access(cmd, os.X_OK):
             return False, f"command path is not executable: {cmd}"
     else:
         # Bare executable name — must be on PATH
@@ -295,7 +345,10 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
                if isinstance(a, str) and os.path.isabs(a) and not os.path.exists(a)]
     if missing:
         return False, f"arg path(s) MISSING: {', '.join(missing)}"
-    return True, f"command '{cmd}' resolves"
+    detail = f"command '{cmd}' resolves"
+    if " " in cmd:
+        detail += " (note: spaces in command may break Trae)"
+    return True, detail
 
 
 def _check_mcp_config() -> list[tuple[str, bool, str]]:
@@ -597,11 +650,58 @@ def update_check() -> int:
 # mcp print / add
 # ---------------------------------------------------------------------------
 
+_SUPPORTED_CLIENTS = ("claude", "trae")
+
+
 def _server_py() -> str:
     return os.path.join(_HERE, "server.py")
 
 
-def _mcp_entry(python_mode: bool, *, project_relative: bool = False) -> dict:
+def _user_cache_dir() -> str:
+    """Platform cache root for sql-buddy (backups, etc.)."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local")
+        return os.path.join(base, "sql-buddy")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Caches",
+                            "sql-buddy")
+    return os.path.join(os.path.expanduser("~"), ".cache", "sql-buddy")
+
+
+def _norm_mcp_path(path: str) -> str:
+    """Absolute, normalized path for embedding in MCP JSON."""
+    return os.path.normpath(os.path.abspath(path))
+
+
+def _resolve_exe(name: str) -> str | None:
+    """Absolute path to a PATH executable, or None."""
+    found = shutil.which(name)
+    if not found:
+        return None
+    return _norm_mcp_path(found)
+
+
+def _mcp_env(client: str) -> dict[str, str]:
+    """Env block for MCP entries. Windows UTF-8 + Trae cold-start timeouts."""
+    env: dict[str, str] = {}
+    if sys.platform == "win32":
+        # Chinese/legacy Windows code pages break JSON-RPC over stdio otherwise.
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+    if client == "trae":
+        # First `uv run` (venv provision) can exceed Trae's default start budget.
+        env["START_MCP_TIMEOUT_MS"] = "120000"
+        env["RUN_MCP_TIMEOUT_MS"] = "120000"
+    return env
+
+
+def _command_has_spaces(cmd: str) -> bool:
+    return " " in (cmd or "")
+
+
+def _mcp_entry(python_mode: bool, *, project_relative: bool = False,
+               client: str = "claude") -> dict:
     """Build the mcpServers['sql-buddy'] entry, paths auto-filled.
 
     Default (uv mode) uses `uv --directory <repo> run server.py` so the venv is
@@ -611,28 +711,71 @@ def _mcp_entry(python_mode: bool, *, project_relative: bool = False) -> dict:
 
     `project_relative=True` writes `--directory .` so a checked-in `.mcp.json`
     in this repo stays portable and is not dirtied with a machine-specific path.
+
+    On Windows / Trae we resolve bare commands to absolute paths (GUI hosts often
+    lack the user's shell PATH) and avoid a `command` field containing spaces
+    (Trae rejects those).
     """
+    env = _mcp_env(client)
+    server = _norm_mcp_path(_server_py())
+
     if python_mode:
-        return {"command": sys.executable, "args": [_server_py()]}
-    directory = "." if project_relative else _HERE
-    return {"command": "uv", "args": ["--directory", directory, "run", "server.py"]}
+        cmd = _norm_mcp_path(sys.executable)
+        args = [server]
+        # Trae: "command must not contain spaces". Prefer the `py` launcher.
+        if client == "trae" and _command_has_spaces(cmd):
+            py = _resolve_exe("py")
+            if py and not _command_has_spaces(py):
+                cmd, args = py, ["-3", server]
+            else:
+                # Last resort — still emit, doctor will flag it.
+                pass
+        entry: dict = {"command": cmd, "args": args}
+    else:
+        uv = _resolve_exe("uv") or "uv"
+        # GUI MCP hosts (Trae on Windows) often don't inherit shell PATH.
+        if uv == "uv" and sys.platform == "win32":
+            # keep bare name; doctor / add will have already preferred --python
+            # when uv is missing. If present only as bare name, leave it.
+            pass
+        directory = "." if project_relative else _norm_mcp_path(_HERE)
+        if client == "trae" and _command_has_spaces(uv):
+            # Fall through to python mode shape with spaceless launcher.
+            return _mcp_entry(True, project_relative=False, client=client)
+        entry = {
+            "command": uv,
+            "args": ["--directory", directory, "run", "server.py"],
+        }
+    if env:
+        entry["env"] = env
+    return entry
 
 
-def cmd_mcp_print(python_mode: bool) -> int:
+def cmd_mcp_print(python_mode: bool, client: str = "claude") -> int:
     # Prefer relative form when printing from inside this checkout (matches
-    # the committed .mcp.json template).
-    rel = os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
-    entry = _mcp_entry(python_mode, project_relative=rel and not python_mode)
+    # the committed .mcp.json template). Relative form is Claude-project only;
+    # Trae project files live under .trae/ and should use absolute --directory.
+    rel = (client == "claude"
+           and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE))
     if not python_mode and not shutil.which("uv"):
         print("# note: 'uv' not found on PATH; this config requires it. "
               "Use --python for a sys.executable-based config.\n",
               file=sys.stderr)
+        if client == "trae" or sys.platform == "win32":
+            python_mode = True
+    entry = _mcp_entry(python_mode, project_relative=rel and not python_mode,
+                       client=client)
+    if client == "trae" and _command_has_spaces(entry.get("command", "")):
+        print("# warning: command path contains spaces; Trae may reject it. "
+              "Install uv/python on a path without spaces, or use the `py` "
+              "launcher.\n", file=sys.stderr)
     print(json.dumps({"mcpServers": {"sql-buddy": entry}}, indent=2))
     return 0
 
 
 def _read_json_file(path: str) -> dict:
-    with open(path) as f:
+    # utf-8-sig: Windows editors (and Trae) may write a BOM.
+    with open(path, encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -652,9 +795,13 @@ def _write_json_file(path: str, data: dict) -> None:
         mode = stat.S_IMODE(os.stat(path).st_mode)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".sql-buddy-mcp-")
     try:
-        os.chmod(tmp, mode)
-        with os.fdopen(fd, "w") as f:
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass  # Windows: chmod is best-effort
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             json.dump(data, f, indent=2)
+            f.write("\n")
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
@@ -664,13 +811,28 @@ def _write_json_file(path: str, data: dict) -> None:
 def _client_config_path(client: str, scope: str) -> str:
     client = (client or "claude").lower()
     scope = (scope or "project").lower()
-    if client != "claude":
-        raise SystemExit(f"unsupported client '{client}' (only 'claude' for now)")
+    if client not in _SUPPORTED_CLIENTS:
+        raise SystemExit(
+            f"unsupported client '{client}' "
+            f"(want {', '.join(_SUPPORTED_CLIENTS)})"
+        )
     home = os.path.expanduser("~")
-    if scope == "project":
-        return os.path.join(os.getcwd(), ".mcp.json")
-    if scope == "user":
-        return os.path.join(home, ".claude.json")
+    if client == "claude":
+        if scope == "project":
+            return os.path.join(os.getcwd(), ".mcp.json")
+        if scope == "user":
+            return os.path.join(home, ".claude.json")
+    if client == "trae":
+        # Official: project-level MCP lives at <workspace>/.trae/mcp.json
+        # (enable "project-level MCP" in Trae Settings → MCP).
+        if scope == "project":
+            return os.path.join(os.getcwd(), ".trae", "mcp.json")
+        if scope == "user":
+            for cand in _trae_user_mcp_candidates():
+                if os.path.isfile(cand):
+                    return cand
+            # Default create target (first platform candidate).
+            return _trae_user_mcp_candidates()[0]
     raise SystemExit(f"unsupported scope '{scope}' (use 'project' or 'user')")
 
 
@@ -678,11 +840,11 @@ def _mcp_backup_path(path: str) -> str:
     """Backup path OUTSIDE any git checkout (token-bearing client configs).
 
     Project-scope `mcp add` may run inside an unrelated repository whose
-    .gitignore does not cover `.mcp.json.bak*`. Putting backups under
-    ~/.cache/sql-buddy/ keeps them out of every working tree.
+    .gitignore does not cover `.mcp.json.bak*`. Putting backups under the
+    user cache dir keeps them out of every working tree.
     """
     import hashlib
-    cache = os.path.join(os.path.expanduser("~"), ".cache", "sql-buddy", "mcp-backups")
+    cache = os.path.join(_user_cache_dir(), "mcp-backups")
     os.makedirs(cache, mode=0o700, exist_ok=True)
     try:
         os.chmod(cache, 0o700)
@@ -701,16 +863,25 @@ def _mcp_backup_path(path: str) -> str:
 def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
     path = _client_config_path(client, scope)
     # Plain-pip installs have no `uv` — fall back so we never write a config
-    # that the client cannot launch.
+    # that the client cannot launch. GUI hosts on Windows also rarely have
+    # bare `uv` on PATH even when a shell does.
     if not python_mode and not shutil.which("uv"):
         print("uv not on PATH; falling back to sys.executable "
               "(pass --python to silence this).", file=sys.stderr)
         python_mode = True
     # Keep the committed .mcp.json portable when adding from inside this checkout.
-    rel = (scope == "project"
+    # Trae project files are per-workspace (.trae/mcp.json) — always absolute.
+    rel = (client == "claude"
+           and scope == "project"
            and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
            and not python_mode)
-    entry = _mcp_entry(python_mode, project_relative=rel)
+    entry = _mcp_entry(python_mode, project_relative=rel, client=client)
+    if client == "trae" and _command_has_spaces(entry.get("command", "")):
+        raise SystemExit(
+            f"refusing to write Trae config: command path contains spaces "
+            f"({entry.get('command')!r}). Install uv on a path without spaces, "
+            f"or ensure the Windows `py` launcher is on PATH, then re-run."
+        )
     mode_note = "python (sys.executable)" if python_mode else (
         "uv relative (.)" if rel else "uv (auto-provisions venv)")
     if os.path.exists(path):
@@ -732,8 +903,8 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
         print(f"sql-buddy already configured in {path} ({mode_note}); no change.")
         return 0
     if os.path.exists(path):
-        # Backups live under ~/.cache/sql-buddy/mcp-backups/ (never adjacent to
-        # a foreign project's working tree where they could be committed).
+        # Backups live under the user cache dir (never adjacent to a foreign
+        # project's working tree where they could be committed).
         bak = _mcp_backup_path(path)
         shutil.copy2(path, bak)
         try:
@@ -743,8 +914,12 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
         print(f"Backed up existing config to {bak}")
     servers["sql-buddy"] = entry
     _write_json_file(path, data)
-    print(f"Wrote sql-buddy into {path}  (scope: {scope}, mode: {mode_note})")
-    print("Restart your MCP client to pick it up.")
+    print(f"Wrote sql-buddy into {path}  "
+          f"(client: {client}, scope: {scope}, mode: {mode_note})")
+    if client == "trae" and scope == "project":
+        print("Trae: enable Settings → MCP → 'project-level MCP', then restart.")
+    else:
+        print("Restart your MCP client to pick it up.")
     return 0
 
 
@@ -760,14 +935,19 @@ Usage:
   sql-buddy version              print version
   sql-buddy doctor [--connect]   validate install + db.ini (+ live pings)
   sql-buddy update-check         compare local checkout to the git remote
-  sql-buddy mcp print [--python] print the MCP client config block
-  sql-buddy mcp add [--client claude] [--scope project|user] [--python]
+  sql-buddy mcp print [--python] [--client claude|trae]
+                                 print the MCP client config block
+  sql-buddy mcp add [--client claude|trae] [--scope project|user] [--python]
                                  write the config into a client's config file
   sql-buddy init                 interactive setup wizard
   sql-buddy help                 show this help
 
 Bare `sql-buddy` (no args) starts the MCP server, so MCP client configs that
 invoke `sql-buddy` or `python server.py` keep working unchanged.
+
+Clients:
+  claude  .mcp.json (project) or ~/.claude.json (user)   [default]
+  trae    .trae/mcp.json (project) or Trae User/mcp.json (user)
 """
 
 
@@ -809,7 +989,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "mcp":
         if not rest:
             print("Usage: sql-buddy mcp <print|add> [--python] "
-                  "[--client claude] [--scope project|user]", file=sys.stderr)
+                  "[--client claude|trae] [--scope project|user]",
+                  file=sys.stderr)
             return 2
         sub = rest[0]
         flags = rest[1:]
@@ -819,7 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
             print(str(e) or "bad flags", file=sys.stderr)
             return 2
         if sub == "print":
-            return cmd_mcp_print(parsed["python"])
+            return cmd_mcp_print(parsed["python"], client=parsed["client"])
         if sub == "add":
             return cmd_mcp_add(parsed["python"],
                                client=parsed["client"], scope=parsed["scope"])
@@ -859,10 +1040,14 @@ def _parse_mcp_flags(flags: list[str]) -> dict:
         if f.startswith("-"):
             raise SystemExit(f"unknown flag: {f} (want {', '.join(sorted(known))})")
         raise SystemExit(f"unexpected argument: {f}")
+    out["client"] = (out["client"] or "").lower()
     if out["scope"] not in ("project", "user"):
         raise SystemExit(f"unsupported --scope '{out['scope']}' (want project|user)")
-    if out["client"] != "claude":
-        raise SystemExit(f"unsupported --client '{out['client']}' (only 'claude' for now)")
+    if out["client"] not in _SUPPORTED_CLIENTS:
+        raise SystemExit(
+            f"unsupported --client '{out['client']}' "
+            f"(want {', '.join(_SUPPORTED_CLIENTS)})"
+        )
     return out
 
 

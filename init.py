@@ -96,13 +96,24 @@ def _choose_mode() -> int:
 
 def _ask_bastion(cfg: configparser.RawConfigParser) -> str:
     print("\n--- Bastion / jump-host ---")
+    if sys.platform == "win32" and not shutil.which("ssh"):
+        print(
+            "  note: `ssh` not on PATH. Auto mode needs OpenSSH Client\n"
+            "  (Windows Settings → Apps → Optional features → OpenSSH Client).\n"
+            "  Or pick External mode and run `ssh -N` yourself."
+        )
     name = _ask("bastion name", "prod")
     section = f"ssh:{name}"
     cfg.add_section(section)
     cfg.set(section, "host", _ask("SSH host"))
     cfg.set(section, "port", str(_ask_int("SSH port", 22)))
     cfg.set(section, "user", _ask("SSH user"))
-    cfg.set(section, "key", _ask("Private key path (e.g. ~/.ssh/id_ed25519)"))
+    key_default = os.path.join("~", ".ssh", "id_ed25519")
+    key_raw = _ask(f"Private key path (e.g. {key_default})")
+    # Expand ~ and normalize slashes so Windows paths like
+    # C:\Users\…\.ssh\id_ed25519 and ~/ .ssh/… both work at runtime.
+    key = os.path.normpath(os.path.expanduser(key_raw.strip().strip('"')))
+    cfg.set(section, "key", key)
     cfg.set(section, "server_alive_interval", str(_ask_int("ServerAliveInterval (seconds)", 30)))
     cfg.set(section, "server_alive_count_max", str(_ask_int("ServerAliveCountMax", 3)))
     return name
@@ -235,12 +246,17 @@ def _write_cfg(cfg, mode_label: str):
             mode = 0o600
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".db.ini.")
     try:
-        os.chmod(tmp, 0o600)
-        with os.fdopen(fd, "w") as f:
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass  # Windows: chmod is best-effort
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             cfg.write(f)
-        os.chmod(tmp, 0o600)
         os.replace(tmp, CONFIG_FILE)
-        os.chmod(CONFIG_FILE, 0o600)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp):
             try:
@@ -415,7 +431,8 @@ def _cfg_from_auto_spec(spec: dict) -> tuple[configparser.RawConfigParser, str]:
     cfg.set(section, "host", str(_require(ssh, "host", "ssh")))
     cfg.set(section, "port", str(_require_port(ssh, "port", "ssh", default=22)))
     cfg.set(section, "user", str(_require(ssh, "user", "ssh")))
-    cfg.set(section, "key", str(_require(ssh, "key", "ssh")))
+    key = str(_require(ssh, "key", "ssh")).strip().strip('"')
+    cfg.set(section, "key", os.path.normpath(os.path.expanduser(key)))
     # keepalive is seconds (not a TCP port) — any non-negative / positive int.
     if "server_alive_interval" in ssh:
         try:

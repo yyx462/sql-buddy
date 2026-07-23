@@ -7,4 +7,4 @@ still report a version. `cli.get_version()` prefers installed metadata when
 available and falls back to this.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

@@ -29,8 +29,10 @@ import atexit
 import configparser
 import logging
 import os
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -192,14 +194,18 @@ class TunnelManager:
 
     def _build_cmd(self, block: str, forwards: list) -> list:
         p = self._blocks[block]
-        key = os.path.expanduser(_resolve_env(p['key']))
+        # expanduser handles ~/… and ~\… on Windows; normpath fixes mixed slashes.
+        key = os.path.normpath(os.path.expanduser(_resolve_env(p['key'])))
         ssh_port = int(_resolve_env(p.get('port', DEFAULT_SSH_PORT)))
         alive_int = _resolve_env(p.get('server_alive_interval', DEFAULT_ALIVE_INTERVAL))
         alive_max = _resolve_env(p.get('server_alive_count_max', DEFAULT_ALIVE_COUNT_MAX))
         user, host = _resolve_env(p['user']), _resolve_env(p['host'])
 
+        # Prefer the resolved binary so GUI-spawned MCP (Trae) finds OpenSSH even
+        # when the shell PATH differs from the IDE's PATH.
+        ssh_bin = shutil.which('ssh') or 'ssh'
         cmd = [
-            'ssh', '-N',
+            ssh_bin, '-N',
             '-o', f'ServerAliveInterval={alive_int}',
             '-o', f'ServerAliveCountMax={alive_max}',
             '-o', 'ExitOnForwardFailure=yes',     # die loudly on a port collision
@@ -211,6 +217,26 @@ class TunnelManager:
             cmd += ['-L', f'127.0.0.1:{lp}:{rh}:{rp}']  # localhost-only bind
         cmd.append(f'{user}@{host}')
         return cmd
+
+    def _popen_kwargs(self) -> dict:
+        """Subprocess flags that work under GUI MCP hosts (esp. Windows/Trae)."""
+        kwargs: dict = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+        }
+        if sys.platform == "win32":
+            # CREATE_NO_WINDOW: no flashing console when Trae/Claude spawns us.
+            # CREATE_NEW_PROCESS_GROUP: detach from parent's console ctrl-events.
+            flags = 0
+            flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            if flags:
+                kwargs["creationflags"] = flags
+        else:
+            # Own process group -> survives parent's signal storm.
+            kwargs["start_new_session"] = True
+        return kwargs
 
     def _ensure_block(self, block: str):
         self._load()
@@ -229,13 +255,14 @@ class TunnelManager:
 
             cmd = self._build_cmd(block, forwards)
             logger.info("Starting SSH tunnel for [%s]: %s", block, ' '.join(cmd))
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,  # own process group -> survives parent's signal storm
-            )
+            try:
+                proc = subprocess.Popen(cmd, **self._popen_kwargs())
+            except FileNotFoundError as e:
+                raise RuntimeError(
+                    f"SSH binary not found while starting tunnel [{block}]. "
+                    f"On Windows install OpenSSH Client (Settings → Apps → "
+                    f"Optional features). Original error: {e}"
+                ) from e
             self._procs[block] = proc
             self._stderr_tail[block] = []
             self._gen[block] = self._gen.get(block, 0) + 1
