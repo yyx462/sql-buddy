@@ -138,8 +138,30 @@ def _parse_db_ini():
                       "offending line is hidden to avoid leaking secrets)")
 
 
+def _is_ssh_section(name: str) -> bool:
+    """Match runtime/tunnel.py: section names are matched case-insensitively."""
+    return name.lower().startswith("ssh:")
+
+
 def _connection_names(cfg) -> list[str]:
-    return [s for s in cfg.sections() if not s.lower().startswith("ssh:")]
+    return [s for s in cfg.sections() if not _is_ssh_section(s)]
+
+
+def _ssh_block_keys(cfg) -> set[str]:
+    """Lowercased bastion names from every [ssh:*]/[SSH:*] section."""
+    keys = set()
+    for s in cfg.sections():
+        if _is_ssh_section(s):
+            keys.add(s.split(":", 1)[1].lower())
+    return keys
+
+
+def _tunnel_block_name(raw: str) -> str:
+    """Extract bastion name from tunnel=ssh:prod / tunnel=SSH:prod / tunnel=prod."""
+    val = (raw or "").strip()
+    if val.lower().startswith("ssh:"):
+        return val.split(":", 1)[1].lower()
+    return val.lower()
 
 
 _VALID_TYPES = frozenset({"clickhouse", "mysql", "mariadb"})
@@ -165,9 +187,10 @@ def _resolve_type_like_runtime(cfg, name: str) -> tuple[str | None, str | None]:
         if explicit not in _VALID_TYPES:
             return None, f"unknown type '{explicit}' (want clickhouse|mysql|mariadb)"
         return explicit, None
-    if name.startswith("ck"):
+    low = name.lower()
+    if low.startswith("ck"):
         return "clickhouse", None
-    if name.startswith("db") or name.startswith("mysql"):
+    if low.startswith("db") or low.startswith("mysql"):
         return "mysql", None
     return None, "missing type (set type=clickhouse|mysql, or name the section ck*/db*/mysql*)"
 
@@ -176,13 +199,15 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
     """Static validation of db.ini shape. Returns (label, ok, detail) rows.
 
     Mirrors runtime rules: connection_type() resolution + int(port) conversion.
+    SSH section/tunnel prefixes are matched case-insensitively (like tunnel.py).
     """
     rows: list[tuple[str, bool, str]] = []
     conns = _connection_names(cfg)
     if not conns:
         rows.append(("db.ini: no connections defined", False,
                      "add at least one [section] (see db.ini.example)"))
-    ssh_blocks = [s for s in cfg.sections() if s.lower().startswith("ssh:")]
+    ssh_sections = [s for s in cfg.sections() if _is_ssh_section(s)]
+    known_blocks = _ssh_block_keys(cfg)
     for name in conns:
         tunneled = cfg.has_option(name, "tunnel") and cfg.get(name, "tunnel", fallback="").strip()
         issues = []
@@ -190,8 +215,8 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
         if type_err:
             issues.append(type_err)
         if tunneled:
-            block = tunneled[4:] if tunneled.startswith("ssh:") else tunneled
-            if f"ssh:{block}" not in cfg.sections():
+            block = _tunnel_block_name(tunneled)
+            if block not in known_blocks:
                 issues.append(f"tunnel references missing [ssh:{block}]")
             for req in ("remote_host", "remote_port", "local_port"):
                 if not cfg.has_option(name, req):
@@ -211,7 +236,7 @@ def _check_config(cfg) -> list[tuple[str, bool, str]]:
             f"{ctype or '?'}" + (f", tunnel={tunneled}" if tunneled else ", direct")
         )
         rows.append((f"connection [{name}]", not issues, detail))
-    for block in ssh_blocks:
+    for block in ssh_sections:
         for req in ("host", "user", "key"):
             if not cfg.has_option(block, req):
                 rows.append((f"bastion [{block}]", False, f"missing {req}"))
@@ -302,15 +327,16 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
                 ok, detail = _validate_mcp_entry(ent)
                 rows.append((f"MCP config {path} [sql-buddy]", ok, detail))
         else:
-            # also detect a server whose args mention server.py / sql-buddy
+            # Only treat an entry as sql-buddy if it is SQL-Buddy-specific —
+            # bare "server.py" is too generic (any Python MCP server).
             for name, ent in servers.items():
                 if not isinstance(ent, dict):
                     continue
-                blob = json.dumps(ent).lower()
-                if "sql-buddy" in blob or "server.py" in blob:
-                    found_any = True
-                    ok, detail = _validate_mcp_entry(ent)
-                    rows.append((f"MCP config {path} [{name}]", ok, detail))
+                if not _looks_like_sql_buddy_entry(name, ent):
+                    continue
+                found_any = True
+                ok, detail = _validate_mcp_entry(ent)
+                rows.append((f"MCP config {path} [{name}]", ok, detail))
     if not found_any:
         rows.append(("MCP client config", False,
                      "sql-buddy not registered with any detected client "
@@ -318,9 +344,42 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
     return rows
 
 
+def _looks_like_sql_buddy_entry(name: str, ent: dict) -> bool:
+    """True only for entries that clearly point at this project."""
+    if name.lower() in ("sql-buddy", "sql_buddy", "sqlbuddy"):
+        return True
+    blob = json.dumps(ent).lower()
+    if "sql-buddy" in blob or "sql_buddy" in blob:
+        return True
+    # resolved path into *this* checkout's server.py
+    here = _HERE.lower()
+    args = ent.get("args") or []
+    if isinstance(args, list):
+        for a in args:
+            if isinstance(a, str) and here in a.lower() and a.lower().endswith("server.py"):
+                return True
+    cmd = ent.get("command")
+    if isinstance(cmd, str) and here in cmd.lower() and "sql-buddy" in cmd.lower():
+        return True
+    return False
+
+
+def _sanitize_detail(text: str) -> str:
+    """Redact known secrets from doctor detail lines (best-effort)."""
+    if not text:
+        return text
+    try:
+        import db_security
+        db_security.install()
+        return db_security.sanitize_text(text)
+    except Exception:
+        return _redact_secrets(text)
+
+
 def _live_hint(msg: str) -> str:
     """Actionable hint for a live-Connection failure. Mirrors server._hint_for
-    without coupling doctor to the MCP runtime."""
+    without coupling doctor to the MCP runtime. Always sanitized."""
+    msg = _sanitize_detail(msg)
     low = msg.lower()
     if any(k in low for k in ("refused", "timed out", "timeout", "tunnel",
                               "connect", "socket", " eof", "closed")):
@@ -340,7 +399,8 @@ def _check_connection_live(name: str) -> tuple[str, str, str]:
     """Ping one Connection (SELECT 1). Returns (label, severity, detail)."""
     try:
         # Match server startup: load .env + install secret filters before any
-        # db_query / connections import so $env: refs in db.ini resolve.
+        # db_query / connections import so $env: refs in db.ini resolve and
+        # exception text is redacted.
         import db_security
         db_security.install()
         import db_query
@@ -349,8 +409,8 @@ def _check_connection_live(name: str) -> tuple[str, str, str]:
         if res.get("status") == "ok":
             return (f"connection [{name}] reachable", "ok",
                     f"{res.get('latency_ms')} ms")
-        return (f"connection [{name}] error", "fail",
-                str(res.get("error") or res))
+        err = _sanitize_detail(str(res.get("error") or res))
+        return (f"connection [{name}] error", "fail", err)
     except Exception as e:
         return (f"connection [{name}] error", "fail", _live_hint(str(e)))
 

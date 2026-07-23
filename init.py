@@ -303,8 +303,11 @@ def _guess_type(name: str) -> str:
 _VALID_TYPES = frozenset({"clickhouse", "mysql", "mariadb"})
 
 
-def _require(d: dict, key: str, where: str):
-    if key not in d or d[key] in (None, ""):
+def _require(d: dict, key: str, where: str, *, allow_empty: bool = False):
+    """Require a field. `allow_empty=True` permits '' (passwordless DB users)."""
+    if key not in d or d[key] is None:
+        raise SystemExit(f"{where}: missing required field '{key}'")
+    if d[key] == "" and not allow_empty:
         raise SystemExit(f"{where}: missing required field '{key}'")
     return d[key]
 
@@ -352,15 +355,18 @@ def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
         cfg.set(name, "local_port",
                 str(_require_port(conn, "local_port", f"connection [{name}]")))
         cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
+        # Empty password is valid (passwordless local MySQL / some ClickHouse setups).
         cfg.set(name, "password",
-                str(_require(conn, "password", f"connection [{name}]")))
+                str(_require(conn, "password", f"connection [{name}]",
+                             allow_empty=True)))
     else:
         cfg.set(name, "host", str(_require(conn, "host", f"connection [{name}]")))
         cfg.set(name, "port",
                 str(_require_port(conn, "port", f"connection [{name}]")))
         cfg.set(name, "user", str(_require(conn, "user", f"connection [{name}]")))
         cfg.set(name, "password",
-                str(_require(conn, "password", f"connection [{name}]")))
+                str(_require(conn, "password", f"connection [{name}]",
+                             allow_empty=True)))
     if conn.get("database"):
         cfg.set(name, "database", str(conn["database"]))
 
