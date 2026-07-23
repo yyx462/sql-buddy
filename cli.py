@@ -21,8 +21,10 @@ server, so existing MCP client configs keep working unchanged.
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -86,12 +88,35 @@ def _check_dep(dist: str, mod: str | None) -> tuple[str, bool]:
         return f"dependency MISSING: {target} ({e})", False
 
 
-def _check_ssh() -> tuple[str, bool]:
+def _has_tunnel(cfg) -> bool:
+    """True if any connection declares a self-managed SSH tunnel."""
+    if cfg is None:
+        return False
+    for name in _connection_names(cfg):
+        val = cfg.get(name, "tunnel", fallback="").strip()
+        if val:
+            return True
+    return False
+
+
+def _check_ssh(needed: bool) -> tuple[str, str, str]:
+    """Return (label, severity, detail). severity in {'ok','warn','fail'}.
+
+    `needed` says whether ANY configured connection actually uses a self-managed
+    tunnel. ssh is only required in that case, so a missing binary is a hard
+    failure only when a tunnel is configured; otherwise it's a non-blocking warn
+    (e.g. an External/direct-only setup never needs ssh).
+    """
     path = shutil.which("ssh")
     if path:
-        return f"ssh binary on PATH: {path}", True
-    return ("ssh binary NOT found on PATH (Auto-mode SSH tunnels will fail; "
-            "install an OpenSSH client)", False)
+        return "ssh binary", "ok", f"on PATH: {path}"
+    if needed:
+        return ("ssh binary", "fail",
+                "NOT on PATH but a connection uses a self-managed tunnel "
+                "(Auto mode); install an OpenSSH client")
+    return ("ssh binary", "warn",
+            "not on PATH (only needed for Auto-mode tunnels — fine for "
+            "External/direct-only setups)")
 
 
 def _parse_db_ini():
@@ -104,8 +129,12 @@ def _parse_db_ini():
     cfg = configparser.ConfigParser()
     try:
         cfg.read(cfg_file)
-    except Exception as e:
-        return None, f"db.ini failed to parse: {e}"
+    except configparser.Error:
+        # Do NOT include the exception text: ConfigParser errors embed the
+        # offending source line, which on db.ini could be a password. Report a
+        # generic parse failure and let the user re-open the file themselves.
+        return None, ("db.ini failed to parse (syntax error; the offending line "
+                      "is hidden to avoid leaking secrets)")
     return cfg, None
 
 
@@ -225,62 +254,92 @@ def _check_mcp_config() -> list[tuple[str, bool, str]]:
     return rows
 
 
-def _check_connection_live(name: str) -> tuple[str, bool, str]:
+def _live_hint(msg: str) -> str:
+    """Actionable hint for a live-Connection failure. Mirrors server._hint_for
+    without coupling doctor to the MCP runtime."""
+    low = msg.lower()
+    if any(k in low for k in ("refused", "timed out", "timeout", "tunnel",
+                              "connect", "socket", " eof", "closed")):
+        return (f"{msg} | hint: transport/tunnel error — in External mode the "
+                "user's tunnel may be down; in Auto mode check remote_host/"
+                "remote_port (the DB as seen from the bastion)")
+    if any(k in low for k in ("access denied", "authentication", "auth",
+                              "password", "login")):
+        return f"{msg} | hint: DB auth failed — check user/password in db.ini"
+    if "no section" in low or "unknown connection" in low:
+        return (f"{msg} | hint: unknown connection — run sql-buddy doctor to "
+                "list configured names")
+    return msg
+
+
+def _check_connection_live(name: str) -> tuple[str, str, str]:
+    """Ping one Connection (SELECT 1). Returns (label, severity, detail)."""
     try:
         import db_query
         raw = db_query.check_connection_query(name)
         res = json.loads(raw)
         if res.get("status") == "ok":
-            return (f"connection [{name}] reachable", True,
+            return (f"connection [{name}] reachable", "ok",
                     f"{res.get('latency_ms')} ms")
-        return (f"connection [{name}] error", False,
+        return (f"connection [{name}] error", "fail",
                 str(res.get("error") or res))
     except Exception as e:
-        return (f"connection [{name}] error", False, str(e))
+        return (f"connection [{name}] error", "fail", _live_hint(str(e)))
 
 
 def doctor(connect: bool = False) -> int:
-    """Validate the install. Returns process exit code (0 all-pass, 1 any fail)."""
+    """Validate the install. Returns process exit code (0 unless something FAILs;
+    WARNs never fail)."""
     print(f"sql-buddy {get_version()} doctor\n")
     fails = 0
+    warns = 0
 
-    def emit(label, ok, detail=""):
-        nonlocal fails
-        mark = "OK  " if ok else "FAIL"
-        if not ok:
+    def emit(label, severity, detail=""):
+        nonlocal fails, warns
+        if severity == "ok":
+            mark = "OK  "
+        elif severity == "warn":
+            mark = "WARN"
+            warns += 1
+        else:
+            mark = "FAIL"
             fails += 1
         line = f"  [{mark}] {label}"
         if detail:
             line += f"  ({detail})"
         print(line)
 
+    # Parse db.ini once, up front, so the ssh check can be conditional on
+    # whether any connection actually uses a self-managed tunnel.
+    cfg, err = _parse_db_ini()
+
     # 1. runtime environment
     print("== runtime ==")
     lbl, ok = _check_python()
-    emit(lbl, ok)
-    emit(*_check_ssh())
+    emit(lbl, "ok" if ok else "fail")
+    emit(*_check_ssh(needed=_has_tunnel(cfg)))
     for dist, mod in _RUNTIME_DEPS:
-        emit(*_check_dep(dist, mod))
+        d_label, d_ok = _check_dep(dist, mod)
+        emit(d_label, "ok" if d_ok else "fail")
 
     # 2. config
     print("\n== db.ini ==")
-    cfg, err = _parse_db_ini()
     if err:
-        emit("db.ini", False, err)
+        emit("db.ini", "fail", err)
         cfg = None
     else:
         conns = _connection_names(cfg)
-        emit(f"db.ini parsed ({len(conns)} connection(s))", True,
+        emit(f"db.ini parsed ({len(conns)} connection(s))", "ok",
              os.path.join(_HERE, "connections", "config", "db.ini"))
         for label, ok, detail in _check_config(cfg):
-            emit(label, ok, detail)
+            emit(label, "ok" if ok else "fail", detail)
 
     # 3. mcp client config
     print("\n== MCP client config ==")
     for label, ok, detail in _check_mcp_config():
-        emit(label, ok, detail)
+        emit(label, "ok" if ok else "fail", detail)
 
-    # 4. live connection pings (opt-in — may open tunnels / hit the network)
+    # 4. live Connection pings (opt-in — may open tunnels / hit the network)
     if connect and cfg is not None:
         print("\n== live connections (SELECT 1) ==")
         for name in _connection_names(cfg):
@@ -288,7 +347,8 @@ def doctor(connect: bool = False) -> int:
     elif connect and cfg is None:
         print("\n== live connections skipped (no db.ini) ==")
 
-    print(f"\n{'All checks passed.' if fails == 0 else f'{fails} check(s) failed.'}")
+    summary = ", ".join([f"{fails} failed", f"{warns} warning(s)"])
+    print(f"\n{'All checks passed.' if fails == 0 and warns == 0 else summary}")
     return 1 if fails else 0
 
 
@@ -346,8 +406,18 @@ def update_check() -> int:
     if remote_sha == local:
         print("Up to date.")
         return 0
-    print("Update available. Run:  git pull")
-    print("(then `uv pip install -e .` if dependencies changed)")
+    # Distinguish behind (update available) from ahead (unpushed local commits)
+    # and diverged, using commit ancestry rather than mere SHA inequality.
+    # `merge-base --is-ancestor A B` exits 0 when A is reachable from B.
+    rc_local_in_remote, _, _ = _git(["merge-base", "--is-ancestor", "HEAD", remote_sha])
+    rc_remote_in_local, _, _ = _git(["merge-base", "--is-ancestor", remote_sha, "HEAD"])
+    if rc_local_in_remote == 0:
+        print("Update available. Run:  git pull")
+        print("(then `uv pip install -e .` if dependencies changed)")
+    elif rc_remote_in_local == 0:
+        print("Local is ahead of remote (unpushed commits). No update needed.")
+    else:
+        print("Branches have diverged. Run:  git pull --rebase (or merge) and resolve.")
     return 0
 
 
@@ -388,11 +458,28 @@ def _read_json_file(path: str) -> dict:
 
 
 def _write_json_file(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    """Write JSON atomically, preserving the existing file mode.
+
+    MCP client configs (notably ~/.claude.json) are commonly mode 0600 and may
+    hold third-party API tokens. Writing through a naive temp file would reset
+    the mode to the process umask (often 0644), exposing them to other local
+    users. So: inherit the existing mode if the file exists, else create 0600;
+    and use a 0600 temp file so the data is never world-readable mid-write.
+    """
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    mode = 0o600
+    if os.path.exists(path):
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".sql-buddy-mcp-")
+    try:
+        os.chmod(tmp, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def _client_config_path(client: str, scope: str) -> str:
@@ -493,8 +580,10 @@ def main(argv: list[str] | None = None) -> int:
         return update_check()
     if cmd == "init":
         import init
-        init.main()
-        return 0
+        # Pass `rest` explicitly: init.main() uses argparse, which reads
+        # sys.argv — so we must not leave the literal "init" token in argv or
+        # argparse rejects it as an unrecognized argument.
+        return init.main(rest) or 0
     if cmd == "mcp":
         if not rest:
             print("Usage: sql-buddy mcp <print|add> [...]", file=sys.stderr)

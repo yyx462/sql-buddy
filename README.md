@@ -48,10 +48,12 @@ uv run sql-buddy doctor     # green-checks the venv, db.ini, and MCP client conf
 uv run sql-buddy mcp add    # registers sql-buddy with Claude Code (writes .mcp.json)
 ```
 
-`uv run sql-buddy <command>` works from any directory. Subcommands: `version`,
-`doctor [--connect]`, `mcp print|add`, `update-check`, `init`. **Bare `sql-buddy`
-(no command) runs the MCP server** — that's what your AI client invokes, so MCP
-client configs hold no fragile absolute path to `.venv/bin/python`.
+`uv run sql-buddy <command>` runs from anywhere inside the checkout (from
+outside it, use `uv --directory /path/to/sql-buddy run sql-buddy …`, or call
+the venv's `sql-buddy` directly). Subcommands: `version`, `doctor [--connect]`,
+`mcp print|add`, `update-check`, `init`. **Bare `sql-buddy` (no command) runs the
+MCP server** — that's what your AI client invokes, so MCP client configs hold no
+fragile absolute path to `.venv/bin/python`.
 
 New here? Walk through the full [Setup](#setup) below.
 
@@ -95,7 +97,7 @@ This also gives you the `sql-buddy` command (run via `uv run sql-buddy …` or
 | Command | What it does |
 |---------|--------------|
 | `sql-buddy version` | Print the installed version. |
-| `sql-buddy doctor` | Validate the install: venv, `db.ini`, and MCP client config. Add `--connect` to also ping each database. |
+| `sql-buddy doctor` | Validate the install: venv, `db.ini`, and MCP client config. Add `--connect` to also ping each Connection (`SELECT 1`). |
 | `sql-buddy init` | Interactive setup wizard (writes `db.ini`). Accepts `--non-interactive --json` for agents/CI. |
 | `sql-buddy mcp print` | Print the MCP client config block (paths filled in). `--python` for a `sys.executable`-based config. |
 | `sql-buddy mcp add` | Write that block straight into Claude Code's config (`.mcp.json` or `~/.claude.json`). |
@@ -281,7 +283,7 @@ with `git status` before pushing - it should never appear as a tracked file.
 
 ### Step 4: Test it works
 
-One command validates the install and (optionally) pings each database:
+One command validates the install and (optionally) pings each Connection:
 
 ```bash
 uv run sql-buddy doctor             # offline: venv + db.ini shape + MCP client config
@@ -360,11 +362,13 @@ value below. Ask the user explicitly, one at a time, in plain language.
 > values and write `db.ini`. The only blocker between you and a finished install is
 > the user-supplied values in steps 2-4 — get to those questions now.
 
-> Prefer the structured path to `db.ini`: collect the values below, then write them
-> with **`uv run sql-buddy init --non-interactive --json '<spec>'`** (schema in
-> `init.py` docstring). It validates and writes `db.ini` for you — no hand-formatting
-> INI, and secrets go straight from the spec into the file, never echoed. You can
-> also write `db.ini` directly with your file-editing tool if you prefer.
+> Prefer the structured path to `db.ini`: collect the values below, then write
+> them with **`uv run sql-buddy init --non-interactive --json-stdin`** (pipe the
+> spec JSON on stdin) or **`--json-file <path>`** (schema in `init.py`). It
+> validates and writes `db.ini` for you — no hand-formatting INI. Feed credentials
+> via **stdin or a file**, not inline `--json`: argv is visible in process
+> listings and shell/agent history. You can also write `db.ini` directly with
+> your file-editing tool if you prefer.
 
 1. **The repository** - clone it, then `uv run server.py` (Ctrl+C once it starts —
    that one command created the venv and installed deps). As soon as it returns,

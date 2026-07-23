@@ -238,7 +238,7 @@ def _setup_external():
     print("\n" + _VERIFY_HINT)
 
 
-def main():
+def main(argv: list[str] | None = None):
     import argparse
     parser = argparse.ArgumentParser(
         prog="sql-buddy-init",
@@ -248,13 +248,20 @@ def main():
         "--non-interactive", action="store_true",
         help="write db.ini from a JSON spec without prompting (for agents / CI)",
     )
-    parser.add_argument("--json", dest="json_str", help="setup spec as a JSON string")
-    parser.add_argument("--json-file", dest="json_file", help="path to a setup-spec JSON file")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--json", dest="json_str",
+        help="setup spec as a JSON string. AVOID for credentials: argv is visible "
+             "in process listings and shell history. Use --json-file or --json-stdin.",
+    )
+    parser.add_argument("--json-file", dest="json_file",
+                        help="path to a setup-spec JSON file (use '-' for stdin)")
+    parser.add_argument("--json-stdin", action="store_true",
+                        help="read the setup spec from stdin (recommended for secrets)")
+    args = parser.parse_args(argv)
 
     if args.non_interactive:
-        _setup_non_interactive(_load_spec(args.json_str, args.json_file))
-        return
+        _setup_non_interactive(_load_spec(args.json_str, args.json_file, args.json_stdin))
+        return 0
 
     print(
         "=== sql-buddy setup ===\n"
@@ -265,6 +272,7 @@ def main():
         _setup_auto()
     else:
         _setup_external()
+    return 0
 
 
 # --- non-interactive spec -> db.ini ---------------------------------------
@@ -348,17 +356,29 @@ def _cfg_from_external_spec(spec: dict) -> tuple[configparser.RawConfigParser, s
     return cfg, "external"
 
 
-def _load_spec(json_str: str | None, json_file: str | None) -> dict:
-    raw = json_str
-    if raw is None and json_file:
+def _load_spec(json_str: str | None, json_file: str | None, json_stdin: bool) -> dict:
+    """Resolve the setup spec to a JSON object.
+
+    Secret-safe precedence: stdin (--json-stdin, or --json-file -) > protected
+    file (--json-file) > $SQL_BUDDY_SETUP_JSON env > inline --json string.
+    Inline --json is allowed for convenience/testing but discouraged for
+    credentials, since argv is visible in process listings and shell history.
+    """
+    raw: str | None = None
+    if json_stdin or json_file == "-":
+        raw = sys.stdin.read()
+    elif json_str is not None:
+        raw = json_str
+    elif json_file:
         with open(os.path.expanduser(json_file)) as f:
             raw = f.read()
-    if raw is None:
+    else:
         raw = os.environ.get("SQL_BUDDY_SETUP_JSON")
     if raw is None:
         raise SystemExit(
-            "--non-interactive needs one of: --json '<spec>' / --json-file <path> "
-            "/ $SQL_BUDDY_SETUP_JSON"
+            "--non-interactive needs one of: --json-stdin / --json-file <path|-> "
+            "/ --json '<spec>' / $SQL_BUDDY_SETUP_JSON (prefer stdin or a file "
+            "for credentials)"
         )
     try:
         spec = json.loads(raw)
