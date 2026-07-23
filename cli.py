@@ -281,9 +281,12 @@ def _validate_mcp_entry(entry: dict) -> tuple[bool, str]:
     if not cmd or not isinstance(cmd, str):
         return False, "no 'command' set"
     if os.path.isabs(cmd) or os.sep in cmd or (os.altsep and os.altsep in cmd):
-        # Absolute or relative filesystem path
-        if not os.path.exists(cmd):
-            return False, f"command path MISSING: {cmd}"
+        # Absolute or relative filesystem path — must be a regular executable file
+        # (a directory or non-executable file is not runnable by the MCP client).
+        if not os.path.isfile(cmd):
+            return False, f"command path MISSING or not a file: {cmd}"
+        if not os.access(cmd, os.X_OK):
+            return False, f"command path is not executable: {cmd}"
     else:
         # Bare executable name — must be on PATH
         if not shutil.which(cmd):
@@ -697,6 +700,12 @@ def _mcp_backup_path(path: str) -> str:
 
 def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
     path = _client_config_path(client, scope)
+    # Plain-pip installs have no `uv` — fall back so we never write a config
+    # that the client cannot launch.
+    if not python_mode and not shutil.which("uv"):
+        print("uv not on PATH; falling back to sys.executable "
+              "(pass --python to silence this).", file=sys.stderr)
+        python_mode = True
     # Keep the committed .mcp.json portable when adding from inside this checkout.
     rel = (scope == "project"
            and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
@@ -712,6 +721,19 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
         except Exception as e:
             raise SystemExit(f"{path} exists but is not valid JSON ({e}); "
                              "fix or remove it first")
+    else:
+        data = {}
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise SystemExit(f"{path} has 'mcpServers' that is not an object; fix it first")
+    # No-op if already equivalent — avoids dirtying the tracked portable .mcp.json.
+    existing = servers.get("sql-buddy")
+    if existing == entry:
+        print(f"sql-buddy already configured in {path} ({mode_note}); no change.")
+        return 0
+    if os.path.exists(path):
+        # Backups live under ~/.cache/sql-buddy/mcp-backups/ (never adjacent to
+        # a foreign project's working tree where they could be committed).
         bak = _mcp_backup_path(path)
         shutil.copy2(path, bak)
         try:
@@ -719,11 +741,6 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
         except OSError:
             pass
         print(f"Backed up existing config to {bak}")
-    else:
-        data = {}
-    servers = data.setdefault("mcpServers", {})
-    if not isinstance(servers, dict):
-        raise SystemExit(f"{path} has 'mcpServers' that is not an object; fix it first")
     servers["sql-buddy"] = entry
     _write_json_file(path, data)
     print(f"Wrote sql-buddy into {path}  (scope: {scope}, mode: {mode_note})")

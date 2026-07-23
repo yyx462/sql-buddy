@@ -371,6 +371,12 @@ def _resolve_type(conn: dict, name: str) -> str:
 
 def _add_conn_section(cfg, conn: dict, *, auto_block: str | None):
     name = _require(conn, "name", "connection")
+    # Runtime skips every [ssh:*] section as a bastion block (case-insensitive).
+    if str(name).lower().startswith("ssh:"):
+        raise SystemExit(
+            f"connection name '{name}' is reserved (ssh:* sections are bastions, "
+            "not Connections)"
+        )
     if cfg.has_section(name) or cfg.has_section(f"ssh:{name}"):
         raise SystemExit(f"connection name '{name}' is duplicated or reserved")
     cfg.add_section(name)

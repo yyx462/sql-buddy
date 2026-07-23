@@ -364,11 +364,11 @@ value below. Ask the user explicitly, one at a time, in plain language.
 
 > Prefer the structured path to `db.ini`: collect the values below, then write
 > them with **`uv run sql-buddy init --non-interactive --json-stdin`** (pipe the
-> spec JSON on stdin) or **`--json-file <path>`** (schema in `init.py`). It
-> validates and writes `db.ini` for you — no hand-formatting INI. Feed credentials
-> via **stdin or a file**, not inline `--json`: argv is visible in process
-> listings and shell/agent history. You can also write `db.ini` directly with
-> your file-editing tool if you prefer.
+> spec JSON on stdin; schema in `init.py`). It validates and writes `db.ini` for
+> you — no hand-formatting INI. **Credentials must travel on stdin** (or a
+> 0600 temp file you delete immediately via `--json-file /tmp/...` and `rm`).
+> Never leave a password-bearing JSON file in a git checkout. You can also write
+> `db.ini` directly with your file-editing tool if you prefer.
 
 1. **The repository** - clone it, then `uv run server.py` (Ctrl+C once it starts —
    that one command created the venv and installed deps). As soon as it returns,
