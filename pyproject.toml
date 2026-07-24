@@ -1,6 +1,6 @@
 [project]
 name = "sql-buddy"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server for read-only database access (MySQL, ClickHouse)"
 requires-python = ">=3.11"
 dependencies = [
