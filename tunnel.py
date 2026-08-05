@@ -42,15 +42,20 @@ logger = logging.getLogger(__name__)
 # circular-import risk by importing from the leaf module rather than the
 # connections __init__ (which imports DBManager -> tunnel).
 try:
-    from connections.config_util import read_config as _read_config, resolve_env as _resolve_env
+    from connections.config_util import (
+        read_config as _read_config,
+        resolve_env as _resolve_env,
+        config_path as _config_path,
+    )
 except ImportError:
     _resolve_env = None
     _read_config = None
+    _config_path = None
 
 
-_CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini'
-)
+_CONFIG_FILE = (_config_path() if _config_path
+                else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'connections', 'config', 'db.ini'))
 
 # ssh defaults
 DEFAULT_SSH_PORT = 22

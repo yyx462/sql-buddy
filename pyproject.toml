@@ -1,15 +1,38 @@
 [project]
-name = "sql-buddy"
+name = "sqlbuddy-nwi"
 version = "0.3.1"
 description = "MCP server for read-only database access (MySQL, ClickHouse)"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ying.yuxiang" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
-    "mcp>=1.0.0",
+    # mcp 2.0 removed `mcp.server.fastmcp`; server.py uses the 1.x API. Cap until
+    # the 2.x port is done (tracked separately). Without this, fresh installs
+    # pull 2.0.0 and the server crashes on `from mcp.server.fastmcp import FastMCP`.
+    "mcp>=1.0.0,<2",
     "pymysql>=1.1.0",
     "clickhouse-driver>=0.2.6",
     "pandas>=2.0.0",
+    "platformdirs>=4.0.0",
 ]
-license = { text = "MIT" }
+
+[project.urls]
+Homepage = "https://github.com/yyx462/sql-buddy"
+Repository = "https://github.com/yyx462/sql-buddy"
+Issues = "https://github.com/yyx462/sql-buddy/issues"
 
 # Explicit build backend + module list. The repo uses a *flat layout*
 # (top-level .py files + the `connections` package), so we must declare the

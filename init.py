@@ -21,9 +21,17 @@ import shutil
 import sys
 from getpass import getpass
 
-CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini'
-)
+try:
+    from connections.config_util import config_write_path as _config_write_path
+except ImportError:
+    _config_write_path = None
+
+# Resolved via the shared helper (env > user dir > checkout-relative; see
+# connections/config_util.py). Falls back to the checkout-relative path if the
+# package isn't importable (e.g. a bare `python init.py` against a vendored tree).
+CONFIG_FILE = (_config_write_path() if _config_write_path
+               else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'connections', 'config', 'db.ini'))
 
 
 # --- WSL detection (lightweight, no heavy imports) ------------------------

@@ -1,0 +1,63 @@
+name: release
+
+# Build sdist + wheel on a `v*` tag and publish to PyPI via Trusted Publishing
+# (OIDC) — no stored API token anywhere. See
+# docs/adr/0003-release-via-github-actions-trusted-publishing.md.
+#
+# Trigger: a `v*` tag pushed to GitHub. The repo's `origin` push remote already
+# fans out to both Gitea (source of truth) and GitHub, so `git push --tags`
+# lands the tag on GitHub and fires this workflow.
+#
+# First-release setup (one-time, on pypi.org — cannot be automated):
+#   Account -> Publishing -> "Add a publisher" -> GitHub, with:
+#     PyPI Project Name : sqlbuddy-nwi
+#     Owner             : yyx462
+#     Repository        : sql-buddy
+#     Workflow name     : release.yml
+#     Environment name  : release
+#   This "pending publisher" reserves the name and creates the project with you
+#   as owner on first publish.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Must match the Environment name configured on the PyPI trusted publisher.
+    environment: release
+    permissions:
+      # REQUIRED for Trusted Publishing: lets this job mint a short-lived PyPI
+      # token via OIDC. Do not remove.
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

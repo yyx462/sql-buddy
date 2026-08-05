@@ -19,3 +19,4 @@ database/
 .env
 .env.local
 tmp/
+.yyx-meta.json
