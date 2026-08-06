@@ -17,7 +17,7 @@ from typing import Any, Dict, Tuple
 import pymysql
 from clickhouse_driver import Client
 
-from .config_util import read_config, resolve_env
+from .config_util import read_config, resolve_env, config_path
 from .runtime import get_windows_host_ip, is_wsl
 from .wrappers import (
     LockedClickHouseClient,
@@ -58,7 +58,7 @@ class DBManager:
 
     def __init__(self, config_file: str = None, remote_db_creds: Dict[str, Tuple[str, str]] = None, wsl_host_override: bool = True):
         if config_file is None:
-            config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'db.ini')
+            config_file = config_path()
         if not os.path.exists(config_file):
             raise FileNotFoundError(f"Config file not found: {config_file}")
 
@@ -76,7 +76,7 @@ class DBManager:
     @staticmethod
     def load_config(config_file: str) -> configparser.RawConfigParser:
         if config_file is None:
-            config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'db.ini')
+            config_file = config_path()
         if not os.path.exists(config_file):
             raise FileNotFoundError(f"Config file not found: {config_file}")
         return read_config(config_file)

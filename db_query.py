@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db_security as _security
 
 from connections import LockedDBManager as DBManager, connection_type
+from connections.config_util import config_path, cache_dir_path
 
 
 def clean_db_error(msg: str) -> str:
@@ -50,11 +51,10 @@ def clean_db_error(msg: str) -> str:
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 2000
 
-# Cache directories
-ROOT_DIR = os.environ.get(
-    'DB_QUERY_HISTORY_DIR',
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database')
-)
+# Cache directories. The root honors $DB_QUERY_HISTORY_DIR, else the per-user
+# cache dir when installed (the package tree is read-only under uvx/pip), else
+# the checkout-relative `database/` dir. See connections.config_util.cache_dir_path.
+ROOT_DIR = cache_dir_path()
 QUERY_HISTORY_DIR = os.path.join(ROOT_DIR, 'query_history')
 DB_INFO_CACHE_DIR = os.path.join(ROOT_DIR, 'db_info_cache')
 DB_SCHEMA_CACHE_DIR = os.path.join(ROOT_DIR, 'db_schema_cache')
@@ -62,7 +62,7 @@ DB_TABLE_LIST_CACHE_DIR = os.path.join(ROOT_DIR, 'table_list_cache')
 
 CACHE_EXPIRE_DAYS = 3
 MAX_HISTORY_ENTRIES = 1000
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'connections', 'config', 'db.ini')
+CONFIG_FILE = config_path()
 
 
 def init_dirs():

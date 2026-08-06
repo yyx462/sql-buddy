@@ -31,6 +31,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # The Python version floor declared in pyproject.toml (requires-python).
 _MIN_PY = (3, 11)
 
+# PyPI distribution name. Differs from the command (`sql-buddy`) and the MCP
+# server name because `sql-buddy` was already taken on PyPI by an unrelated
+# 2020 project — see docs/adr/0004-published-as-sqlbuddy-nwi.md. uvx therefore
+# needs `--from sqlbuddy-nwi sql-buddy` (package name != command name).
+_DIST_NAME = "sqlbuddy-nwi"
+
 # Runtime dependencies doctor verifies are importable. These mirror
 # pyproject.toml [project.dependencies] (plus the system `ssh` binary for
 # Auto-mode tunnels, checked separately).
@@ -39,6 +45,7 @@ _RUNTIME_DEPS = [
     ("pymysql", None),
     ("clickhouse_driver", None),
     ("pandas", None),
+    ("platformdirs", None),
 ]
 
 
@@ -51,7 +58,7 @@ def get_version() -> str:
     try:
         from importlib.metadata import version, PackageNotFoundError
         try:
-            return version("sql-buddy")
+            return version(_DIST_NAME)
         except PackageNotFoundError:
             pass
     except Exception:
@@ -132,11 +139,11 @@ def _parse_db_ini():
     will actually load. Never echoes the raw parse exception — ConfigParser
     errors embed the offending source line, which on db.ini can be a password.
     """
-    cfg_file = os.path.join(_HERE, "connections", "config", "db.ini")
+    from connections.config_util import config_path, read_config
+    cfg_file = config_path()
     if not os.path.exists(cfg_file):
         return None, f"db.ini not found at {cfg_file} (run: sql-buddy init)"
     try:
-        from connections.config_util import read_config
         return read_config(cfg_file), None
     except Exception:
         return None, ("db.ini failed to parse (syntax/encoding error; the "
@@ -535,8 +542,8 @@ def doctor(connect: bool = False) -> int:
         cfg = None
     else:
         conns = _connection_names(cfg)
-        emit(f"db.ini parsed ({len(conns)} connection(s))", "ok",
-             os.path.join(_HERE, "connections", "config", "db.ini"))
+        from connections.config_util import config_path as _config_path
+        emit(f"db.ini parsed ({len(conns)} connection(s))", "ok", _config_path())
         for label, ok, detail in _check_config(cfg):
             emit(label, "ok" if ok else "fail", detail)
 
@@ -705,8 +712,9 @@ def _resolve_exe(name: str) -> str | None:
 
 
 def _mcp_env(client: str) -> dict[str, str]:
-    """Env block for MCP entries. Windows UTF-8 + Trae cold-start timeouts."""
-    env: dict[str, str] = {}
+    """Env block for MCP entries. Unbuffered stdio + Windows UTF-8 + Trae timeouts."""
+    # Unbuffered so JSON-RPC over stdio is never delayed by block buffering.
+    env: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
     if sys.platform == "win32":
         # Chinese/legacy Windows code pages break JSON-RPC over stdio otherwise.
         env["PYTHONUTF8"] = "1"
@@ -723,44 +731,99 @@ def _command_has_spaces(cmd: str) -> bool:
 
 
 def _mcp_entry(python_mode: bool, *, project_relative: bool = False,
-               client: str = "claude") -> dict:
+               client: str = "claude", command_override: str = None) -> dict:
     """Build the mcpServers['sql-buddy'] entry, paths auto-filled.
 
-    Default (uv mode) uses `uv --directory <repo> run server.py` so the venv is
-    auto-provisioned and there is no absolute .venv path to go stale. `--python`
-    uses the interpreter currently running the CLI (sys.executable), which is
-    the most robust absolute path when uv is unavailable.
+    Mode selection (see docs/adr/0002-config-discovery-and-invocation-mode-on-publish.md):
+      --command <cmd>     explicit override (shlex-split into command + args)
+      --python            the running interpreter + server.py
+      auto, checkout:     `uv --directory <repo> run server.py` (auto-provisions
+                          the venv; no absolute .venv path to go stale)
+      auto, installed:    `uvx --from sqlbuddy-nwi sql-buddy` (PyPI; dist name
+                          differs from the command), or `uv tool run --from
+                          sqlbuddy-nwi sql-buddy`, or the `sql-buddy` console
+                          script for a plain pip/pipx copy
 
     `project_relative=True` writes `--directory .` so a checked-in `.mcp.json`
     in this repo stays portable and is not dirtied with a machine-specific path.
 
-    On Windows / Trae we resolve bare `uv` to an absolute path (GUI hosts often
+    On Windows / Trae we resolve bare names to absolute paths (GUI hosts often
     lack the user's shell PATH). We never substitute `py -3` for sys.executable:
     that would drop the active venv and its deps. If Trae cannot accept the
     command path (spaces), callers must refuse rather than guess another Python.
     """
     env = _mcp_env(client)
-    server = _norm_mcp_path(_server_py())
 
-    if python_mode:
+    if command_override:
+        import shlex
+        parts = shlex.split(command_override)
+        if not parts:
+            raise SystemExit("--command requires a non-empty command string")
+        entry: dict = {"command": parts[0], "args": parts[1:]}
+    elif python_mode:
         # Always the invoking interpreter — keeps the active uv/.venv deps.
-        cmd = _norm_mcp_path(sys.executable)
-        entry: dict = {"command": cmd, "args": [server]}
+        entry = {"command": _norm_mcp_path(sys.executable),
+                 "args": [_norm_mcp_path(_server_py())]}
     else:
-        # Absolute uv only where GUI hosts need it. Bare `uv` keeps Claude's
-        # checked-in .mcp.json portable on Unix.
-        if client == "trae" or sys.platform == "win32":
-            uv = _resolve_exe("uv") or "uv"
+        from connections.config_util import is_checkout
+        if is_checkout():
+            # Absolute uv only where GUI hosts need it. Bare `uv` keeps Claude's
+            # checked-in .mcp.json portable on Unix.
+            if client == "trae" or sys.platform == "win32":
+                uv = _resolve_exe("uv") or "uv"
+            else:
+                uv = "uv"
+            directory = "." if project_relative else _norm_mcp_path(_HERE)
+            entry = {"command": uv,
+                     "args": ["--directory", directory, "run", "server.py"]}
         else:
-            uv = "uv"
-        directory = "." if project_relative else _norm_mcp_path(_HERE)
-        entry = {
-            "command": uv,
-            "args": ["--directory", directory, "run", "server.py"],
-        }
+            entry = _installed_entry(client)
+
     if env:
         entry["env"] = env
     return entry
+
+
+def _installed_entry(client: str) -> dict:
+    """MCP entry for an installed (non-checkout) sql-buddy.
+
+    Prefer `uvx --from sqlbuddy-nwi sql-buddy` (the dist name differs from the
+    command name, so uvx needs --from; pulls the latest from PyPI into an
+    ephemeral venv); fall back to `uv tool run --from sqlbuddy-nwi sql-buddy` if
+    only `uv` is on PATH, then to the `sql-buddy` console script for a plain
+    pip/pipx install. GUI hosts (Trae) and Windows resolve bare names to
+    absolute paths so the host finds them without the user's shell PATH; Unix
+    non-Trae keeps them bare for portability.
+    """
+    gui = client == "trae" or sys.platform == "win32"
+
+    def pick(name: str) -> str:
+        return (_resolve_exe(name) or name) if gui else name
+
+    if shutil.which("uvx"):
+        return {"command": pick("uvx"),
+                "args": ["--from", _DIST_NAME, "sql-buddy"]}
+    if shutil.which("uv"):
+        return {"command": pick("uv"),
+                "args": ["tool", "run", "--from", _DIST_NAME, "sql-buddy"]}
+    return {"command": pick("sql-buddy"), "args": []}
+
+
+def _mcp_mode_note(entry: dict, python_mode: bool, command_override: str | None,
+                   rel: bool, checkout: bool) -> str:
+    """Human label for the mode _mcp_entry selected (for add/print messages)."""
+    if command_override:
+        return f"command override ({command_override})"
+    if python_mode:
+        return "python (sys.executable)"
+    if checkout:
+        return "uv relative (.)" if rel else "uv (auto-provisions venv)"
+    args = entry.get("args", [])
+    if args == ["--from", _DIST_NAME, "sql-buddy"]:
+        return f"uvx --from {_DIST_NAME} sql-buddy (PyPI)"
+    if len(args) >= 4 and args[:4] == ["tool", "run", "--from", _DIST_NAME]:
+        return f"uv tool run --from {_DIST_NAME} sql-buddy (PyPI)"
+    return "sql-buddy (console script)"
 
 
 def _trae_command_space_error(cmd: str) -> str:
@@ -773,20 +836,26 @@ def _trae_command_space_error(cmd: str) -> str:
     )
 
 
-def cmd_mcp_print(python_mode: bool, client: str = "claude") -> int:
-    # Prefer relative form when printing from inside this checkout (matches
-    # the committed .mcp.json template). Relative form is Claude-project only;
-    # Trae project files live under .trae/ and should use absolute --directory.
-    rel = (client == "claude"
+def cmd_mcp_print(python_mode: bool, client: str = "claude",
+                  command_override: str = None) -> int:
+    # Relative --directory only makes sense inside a checkout (Claude project),
+    # matching the committed .mcp.json template. Trae project files live under
+    # .trae/ and use absolute --directory.
+    from connections.config_util import is_checkout
+    checkout = is_checkout()
+    rel = (client == "claude" and checkout
            and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE))
-    if not python_mode and not shutil.which("uv"):
+    # Only a checkout needs uv to auto-provision the venv; installed copies pick
+    # uvx/console-script inside _mcp_entry.
+    if (checkout and not python_mode and not command_override
+            and not shutil.which("uv")):
         print("# note: 'uv' not found on PATH; this config requires it. "
               "Use --python for a sys.executable-based config.\n",
               file=sys.stderr)
         if client == "trae" or sys.platform == "win32":
             python_mode = True
     entry = _mcp_entry(python_mode, project_relative=rel and not python_mode,
-                       client=client)
+                       client=client, command_override=command_override)
     if client == "trae" and _command_has_spaces(entry.get("command", "")):
         print(f"# warning: {_trae_command_space_error(entry.get('command', ''))}\n",
               file=sys.stderr)
@@ -881,12 +950,17 @@ def _mcp_backup_path(path: str) -> str:
         n += 1
 
 
-def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
+def cmd_mcp_add(python_mode: bool, client: str, scope: str,
+                command_override: str = None) -> int:
     path = _client_config_path(client, scope)
-    # Plain-pip installs have no `uv` — fall back so we never write a config
-    # that the client cannot launch. GUI hosts on Windows also rarely have
-    # bare `uv` on PATH even when a shell does.
-    if not python_mode and not shutil.which("uv"):
+    from connections.config_util import is_checkout
+    checkout = is_checkout()
+    # A checkout with no `uv` can't auto-provision its venv — fall back to the
+    # running interpreter so we never write a config the client can't launch.
+    # Installed copies select uvx/console-script inside _mcp_entry instead, so
+    # this fallback is checkout-only.
+    if (checkout and not python_mode and not command_override
+            and not shutil.which("uv")):
         print("uv not on PATH; falling back to sys.executable "
               "(pass --python to silence this).", file=sys.stderr)
         python_mode = True
@@ -894,13 +968,15 @@ def cmd_mcp_add(python_mode: bool, client: str, scope: str) -> int:
     # Trae project files are per-workspace (.trae/mcp.json) — always absolute.
     rel = (client == "claude"
            and scope == "project"
+           and checkout
            and os.path.realpath(os.getcwd()) == os.path.realpath(_HERE)
-           and not python_mode)
-    entry = _mcp_entry(python_mode, project_relative=rel, client=client)
+           and not python_mode
+           and not command_override)
+    entry = _mcp_entry(python_mode, project_relative=rel, client=client,
+                       command_override=command_override)
     if client == "trae" and _command_has_spaces(entry.get("command", "")):
         raise SystemExit(_trae_command_space_error(entry.get("command", "")))
-    mode_note = "python (sys.executable)" if python_mode else (
-        "uv relative (.)" if rel else "uv (auto-provisions venv)")
+    mode_note = _mcp_mode_note(entry, python_mode, command_override, rel, checkout)
     if os.path.exists(path):
         try:
             data = _read_json_file(path)
@@ -952,9 +1028,9 @@ Usage:
   sql-buddy version              print version
   sql-buddy doctor [--connect]   validate install + db.ini (+ live pings)
   sql-buddy update-check         compare local checkout to the git remote
-  sql-buddy mcp print [--python] [--client claude|trae]
+  sql-buddy mcp print [--python] [--command CMD] [--client claude|trae]
                                  print the MCP client config block
-  sql-buddy mcp add [--client claude|trae] [--scope project|user] [--python]
+  sql-buddy mcp add [--client claude|trae] [--scope project|user] [--python] [--command CMD]
                                  write the config into a client's config file
   sql-buddy init                 interactive setup wizard
   sql-buddy help                 show this help
@@ -1005,7 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
         return init.main(rest) or 0
     if cmd == "mcp":
         if not rest:
-            print("Usage: sql-buddy mcp <print|add> [--python] "
+            print("Usage: sql-buddy mcp <print|add> [--python] [--command CMD] "
                   "[--client claude|trae] [--scope project|user]",
                   file=sys.stderr)
             return 2
@@ -1017,10 +1093,12 @@ def main(argv: list[str] | None = None) -> int:
             print(str(e) or "bad flags", file=sys.stderr)
             return 2
         if sub == "print":
-            return cmd_mcp_print(parsed["python"], client=parsed["client"])
+            return cmd_mcp_print(parsed["python"], client=parsed["client"],
+                                 command_override=parsed["command"])
         if sub == "add":
-            return cmd_mcp_add(parsed["python"],
-                               client=parsed["client"], scope=parsed["scope"])
+            return cmd_mcp_add(parsed["python"], client=parsed["client"],
+                               scope=parsed["scope"],
+                               command_override=parsed["command"])
         print(f"Unknown 'mcp' subcommand: {sub} (want print|add)", file=sys.stderr)
         return 2
 
@@ -1031,14 +1109,28 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_mcp_flags(flags: list[str]) -> dict:
     """Strict flag parser for `mcp print|add`. Unknown / valueless flags error."""
-    out = {"python": False, "client": "claude", "scope": "project"}
-    known = {"--python", "--client", "--scope"}
+    out = {"python": False, "client": "claude", "scope": "project", "command": None}
+    known = {"--python", "--client", "--scope", "--command"}
     i = 0
     while i < len(flags):
         f = flags[i]
         if f == "--python":
             out["python"] = True
             i += 1
+            continue
+        if f.startswith("--command="):
+            out["command"] = f[len("--command="):]
+            if not out["command"]:
+                raise SystemExit("--command requires a value")
+            i += 1
+            continue
+        if f == "--command":
+            # A command string may itself contain leading-dash tokens, so do
+            # NOT treat a '-'-prefixed next token as a missing value here.
+            if i + 1 >= len(flags):
+                raise SystemExit("--command requires a value (got end of args)")
+            out["command"] = flags[i + 1]
+            i += 2
             continue
         if f.startswith("--client=") or f.startswith("--scope="):
             name, _, val = f.partition("=")
