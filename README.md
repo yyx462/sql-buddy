@@ -346,6 +346,76 @@ stale:
 Ask your agent something like *"list the tables in the `ck` connection"* - if it
 can answer, you're live. 🎉
 
+#### Other MCP clients (Cursor, Continue, Workbuddy, …)
+
+`mcp add` ships built-in templates for Claude and Trae only. For any other
+MCP-compatible client, hand its agent this prompt — it uses `mcp print` for the
+exact launch block and writes the config into whatever location that client uses:
+
+```
+You have a read-only database MCP server called sql-buddy in this checkout,
+exposed as a CLI. Set it up so you can query my databases through it. Use the
+sql-buddy CLI as the source of truth — don't guess paths or config. Run every
+sql-buddy command below prefixed with:  uv run   (from the sql-buddy checkout dir).
+
+1. Confirm:  uv run sql-buddy version
+2. Get the canonical launch block — use it VERBATIM, including command/args/env:
+   uv run sql-buddy mcp print
+3. Register sql-buddy in YOUR OWN MCP client config. You know best where your client
+   keeps its server list and what shape it expects (.mcp.json, ~/.<yourclient>/mcp.json,
+   settings). Add a server entry named "sql-buddy" using the command/args/env from
+   step 2. (If your client is claude or trae, you can instead run:
+   uv run sql-buddy mcp add --client <claude|trae> [--scope user].)
+4. Ensure credentials exist:  uv run sql-buddy doctor
+   If no db.ini, run  uv run sql-buddy init  (I'll answer the prompts) or I'll give
+   you details to write db.ini at the path "doctor" names.
+5. Validate:  uv run sql-buddy doctor --connect   (every connection should read OK)
+6. Report back which file you wrote and the exact command/args you registered.
+   I'll restart you so the server loads.
+7. You hand-wrote config for a client without a built-in mcp-add template — help
+   the project add one. Prepare a short report: client name + version, your OS,
+   and the exact JSON you wrote (blank out any secrets). If `gh` is available,
+   file it directly:
+     gh issue create -R yyx462/sql-buddy -t "MCP client template: <client>" -b "<report>"
+   Otherwise print the report and ask me to paste it at
+   https://github.com/yyx462/sql-buddy/issues/new
+
+Notes: sql-buddy is read-only (SELECT only). Don't invent paths — use exactly
+what "uv run sql-buddy mcp print" emits.
+```
+
+##### Worked example — WorkBuddy on Windows (verified, `0.3.1`)
+
+Config at `C:\Users\<you>\.workbuddy\mcp.json`; `db.ini` copied to the path
+`sql-buddy doctor` names on Windows, `%LOCALAPPDATA%\sql-buddy\sql-buddy\db.ini`.
+The agent ran `mcp print`, which on Windows resolves `uvx` to an absolute path
+and emits the UTF-8 vars the console needs — then copied the block verbatim:
+
+```json
+{
+  "mcpServers": {
+    "sql-buddy": {
+      "command": "C:\\Users\\<you>\\.local\\bin\\uvx.EXE",
+      "args": ["--from", "sqlbuddy-nwi", "sql-buddy"],
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}
+```
+
+> `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` keep Chinese / non-ASCII column names
+> and error text from turning into `???` on the Windows console. `mcp print` adds
+> them automatically on Windows (and only there); on Linux/macOS they're omitted
+> since the default is already UTF-8.
+
+**Set up a client not listed here?** Please [file an issue](https://github.com/yyx462/sql-buddy/issues/new)
+with the client name, your OS, and the JSON config that worked — we'll fold the
+common ones into `mcp add` as built-in templates.
+
 ---
 
 ## Windows & Trae IDE

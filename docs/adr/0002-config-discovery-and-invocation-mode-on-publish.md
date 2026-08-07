@@ -21,7 +21,7 @@ Two constraints force this:
 
 The search order is: (1) `$SQL_BUDDY_CONFIG` if set (power users, CI, multiple
 configs), else (2) the per-user config dir via `platformdirs`
-(`~/.config/sql-buddy/db.ini` on Linux, `%APPDATA%/sql-buddy` on Windows,
+(`~/.config/sql-buddy/db.ini` on Linux, `%LOCALAPPDATA%\sql-buddy\sql-buddy\db.ini` on Windows,
 `~/Library/Application Support/sql-buddy` on macOS), else (3) the
 checkout-relative path `connections/config/db.ini` for dev/back-compat. New
 `uvx` users land on (2); existing checkout users land on (3). The three
