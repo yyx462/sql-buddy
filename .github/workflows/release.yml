@@ -1,7 +1,8 @@
 name: release
 
-# Build sdist + wheel on a `v*` tag and publish to PyPI via Trusted Publishing
-# (OIDC) — no stored API token anywhere. See
+# Build sdist + wheel on a `v*` tag, publish to PyPI via Trusted Publishing
+# (OIDC) — no stored API token anywhere — then create a GitHub Release with
+# auto-generated notes. See
 # docs/adr/0003-release-via-github-actions-trusted-publishing.md.
 #
 # Trigger: a `v*` tag pushed to GitHub. The repo's `origin` push remote already
@@ -61,3 +62,24 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    # Once PyPI is live, publish a GitHub Release page with auto-generated notes
+    # (commits/PRs since the previous release tag). Idempotent: skips if a
+    # release for this tag already exists (e.g. on a workflow re-run).
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      # Creating a release is a write to repo contents.
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release $TAG already exists; skipping"
+          else
+            gh release create "$TAG" -R "${{ github.repository }}" --generate-notes --title "$TAG"
+          fi
