@@ -1,0 +1,19 @@
+{
+  "name": "sql-buddy-afk",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AFK issue→implement→Gitea PR loop for sql-buddy (Sandcastle + tea)",
+  "scripts": {
+    "afk": "tsx .sandcastle/main.ts",
+    "afk:dry": "AFK_DRY_RUN=1 tsx .sandcastle/main.ts",
+    "afk:host": "AFK_SANDBOX=none tsx .sandcastle/main.ts",
+    "sandbox:build": "bash scripts/build-sandbox.sh",
+    "test": "bash scripts/test/run-tests.sh"
+  },
+  "devDependencies": {
+    "@ai-hero/sandcastle": "^0.12.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

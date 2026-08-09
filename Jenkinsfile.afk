@@ -1,0 +1,211 @@
+// sql-buddy AFK pipeline — Jenkins job "sql-buddy-afk" (cicd.nint.hk)
+//
+// Unattended issue → implement → Gitea PR (human merges). Sandcastle + Pi in
+// Docker; host wrapper uses tea + SSH push. See afk/README.md.
+//
+// The review job (Jenkinsfile / sql-buddy-review) is PARKED while AFK is the
+// active automation — do not delete it; disable that job in the UI.
+//
+// Secrets on web01 (files, not Jenkins cred store — same doctrine as review):
+//   - AFK Gitea token : /data/www/algo/deps/gitea-token-afk
+//       scopes: issue RW, repository RW, user R, misc R (NO other scopes)
+//       Push uses git SSH (sea), not this token.
+//   - ZAI Coding Plan : /data/www/algo/deps/zai-coding-cn-key
+//       injected only into the AFK sandbox as ZAI_CODING_CN_API_KEY
+//
+// One-time setup: afk/scripts/setup-web01.sh + afk/README.md
+//
+// Phase 1 trigger: Build with Parameters → AFK_ISSUE
+// Phase 2 trigger: Gitea issue webhook when label ready-for-agent is added
+//   (Generic Webhook; filter on label; idempotent if branch/PR exists)
+
+pipeline {
+    agent {
+        node {
+            label 'web01'
+            customWorkspace '/data/www/algo/sql-buddy-afk'
+        }
+    }
+
+    options {
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'AFK_ISSUE',
+            defaultValue: '',
+            description: 'Gitea issue number to implement (required for manual runs)'
+        )
+    }
+
+    environment {
+        GITEA_URL              = 'https://git.sh.nint.com'
+        AFK_REPO               = 'ying.yuxiang/sql-buddy'
+        AFK_BASE_BRANCH        = 'master'
+        AFK_LABEL              = 'ready-for-agent'
+        AFK_IN_PROGRESS_LABEL  = 'afk:in-progress'
+        AFK_TEA_LOGIN          = 'sql-buddy-afk'
+        AFK_GITEA_TOKEN_FILE   = '/data/www/algo/deps/gitea-token-afk'
+        AFK_ZAI_KEY_FILE       = '/data/www/algo/deps/zai-coding-cn-key'
+        AFK_DOCKER_IMAGE       = 'sql-buddy-afk:pi'
+        AFK_SANDBOX            = 'docker'
+        AFK_MAX_ITERATIONS     = '8'
+        AFK_PROVIDER           = 'zai-coding-cn'
+        AFK_MODEL              = 'glm-4.7'
+        AFK_AGENT              = 'pi'
+        AFK_GIT_AUTHOR_NAME    = 'sql-buddy-afk'
+        AFK_GIT_AUTHOR_EMAIL   = 'sql-buddy-afk@local'
+        // Shared deps on web01 (amazon_alg / review doctrine)
+        DOCKER                 = '/data/www/algo/deps/docker'
+        UV                     = '/data/www/algo/deps/uv'
+        NODE_BIN               = '/data/www/algo/deps/node/bin'
+        TEA_BIN                = '/data/www/algo/deps/tea'
+        PATH                   = "/data/www/algo/deps/node/bin:/data/www/algo/deps:${env.PATH}"
+    }
+
+    triggers {
+        // Phase 2: enable after manual AFK_ISSUE runs are green.
+        // Gitea → repo webhooks → issues events; Generic Webhook token below.
+        GenericTrigger(
+            token: 'sql-buddy-afk',
+            causeString: 'AFK issue #$ISSUE_NUMBER',
+            genericVariables: [
+                [key: 'ISSUE_ACTION',  value: '$.action'],
+                [key: 'ISSUE_NUMBER',  value: '$.issue.number'],
+                [key: 'ISSUE_TITLE',   value: '$.issue.title'],
+                [key: 'LABEL_NAME',    value: '$.label.name'],
+                [key: 'REPO_FULL',     value: '$.repository.full_name'],
+            ],
+            // label_updated with ready-for-agent, or empty for manual
+            regexpFilterText: '$ISSUE_ACTION:$LABEL_NAME',
+            regexpFilterExpression: '^(label_updated:ready-for-agent|:$)$',
+            printContributedVariables: false,
+            printPostContent: false,
+        )
+    }
+
+    stages {
+        stage('Resolve issue') {
+            steps {
+                script {
+                    def fromParam = params.AFK_ISSUE?.trim()
+                    def fromHook = env.ISSUE_NUMBER?.trim()
+                    if (fromParam) {
+                        env.AFK_ISSUE = fromParam
+                    } else if (fromHook) {
+                        env.AFK_ISSUE = fromHook
+                    } else {
+                        error 'Set AFK_ISSUE parameter or trigger via ready-for-agent label webhook'
+                    }
+                    echo "AFK_ISSUE=${env.AFK_ISSUE}"
+                }
+            }
+        }
+
+        stage('Checkout master') {
+            steps {
+                sh '''
+                set -e
+                # SSH clone/fetch via Jenkins git credential (sea) — not the API token
+                if [ ! -d .git ]; then
+                    git clone git@git.sh.nint.com:ying.yuxiang/sql-buddy.git .
+                fi
+                git fetch origin master
+                git checkout -B master origin/master
+                git reset --hard origin/master
+                git clean -fd
+                git log --oneline -1
+                '''
+            }
+        }
+
+        stage('Host tooling guard') {
+            steps {
+                sh '''
+                set -e
+                [ -x "$DOCKER" ] || { echo "missing $DOCKER"; exit 127; }
+                [ -x "$TEA_BIN" ] || command -v tea >/dev/null || {
+                    echo "missing tea at $TEA_BIN or PATH — run afk/scripts/setup-web01.sh"
+                    exit 127
+                }
+                command -v node >/dev/null || [ -x "$NODE_BIN/node" ] || {
+                    echo "missing node — install under /data/www/algo/deps/node"
+                    exit 127
+                }
+                [ -f "$AFK_GITEA_TOKEN_FILE" ] || {
+                    echo "missing $AFK_GITEA_TOKEN_FILE"
+                    exit 127
+                }
+                [ -f "$AFK_ZAI_KEY_FILE" ] || {
+                    echo "missing $AFK_ZAI_KEY_FILE"
+                    exit 127
+                }
+                "$DOCKER" version --format 'docker ok'
+                tea --version || "$TEA_BIN" --version
+                node --version
+                '''
+            }
+        }
+
+        stage('npm install + sandbox image') {
+            steps {
+                sh '''
+                set -e
+                cd afk
+                npm ci || npm install
+                export DOCKER="$DOCKER"
+                export AFK_DOCKER_IMAGE="$AFK_DOCKER_IMAGE"
+                npm run sandbox:build
+                '''
+            }
+        }
+
+        stage('AFK run') {
+            steps {
+                sh '''
+                set -e
+                cd afk
+                export AFK_ISSUE
+                export AFK_REPO AFK_BASE_BRANCH AFK_LABEL AFK_IN_PROGRESS_LABEL
+                export AFK_TEA_LOGIN AFK_GITEA_TOKEN_FILE AFK_GITEA_URL="$GITEA_URL"
+                export AFK_DOCKER_IMAGE AFK_SANDBOX AFK_MAX_ITERATIONS
+                export AFK_PROVIDER AFK_MODEL AFK_AGENT
+                export AFK_GIT_AUTHOR_NAME AFK_GIT_AUTHOR_EMAIL
+                export AFK_CWD="$WORKSPACE"
+                export AFK_TEA_CONFIG_HOME="$WORKSPACE/afk/.tea-config"
+                export AFK_READONLY_INI="$WORKSPACE/connections/config/db.ini.example"
+                export PATH="$NODE_BIN:/data/www/algo/deps:$PATH"
+                # Prefer deps tea if present
+                if [ -x "$TEA_BIN" ]; then
+                    export PATH="$(dirname "$TEA_BIN"):$PATH"
+                fi
+                { set +x; } 2>/dev/null
+                export ZAI_API_KEY="$(tr -d '[:space:]' < "$AFK_ZAI_KEY_FILE")"
+                export ZAI_CODING_CN_API_KEY="$ZAI_API_KEY"
+                { set -x; } 2>/dev/null
+                npm run afk
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                set +e
+                cd "$WORKSPACE" 2>/dev/null || exit 0
+                [ -d .git ] || exit 0
+                git fetch origin master 2>/dev/null || true
+                git checkout -B master origin/master 2>/dev/null || true
+                git reset --hard origin/master 2>/dev/null || true
+                git clean -fd 2>/dev/null || true
+                rm -rf afk/.tea-config afk/.sandcastle/.prompt.filled.md 2>/dev/null || true
+                echo "sync: workspace at $(git log --oneline -1 2>/dev/null)"
+            '''
+        }
+    }
+}

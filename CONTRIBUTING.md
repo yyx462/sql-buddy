@@ -3,15 +3,21 @@
 ## Open PRs freely
 
 You (or your agent) can open pull requests without asking first. There is no
-gatekeeper — the automated Review agent will provide a first-pass review on
-every PR.
+gatekeeper. Prefer a human or agent self-check against [AGENTS.md](./AGENTS.md)
+before merge.
 
-## What gets reviewed automatically
+## Automated Review (parked)
 
-Every newly opened PR (and every push to an existing PR) gets an automated
-**Review pass** — the Review agent (pi) reads the diff and the code, checks it
-against the rubric in [AGENTS.md](./AGENTS.md), and posts a comment with a
-verdict label:
+The Jenkins **Review agent** job (`sql-buddy-review`) is **parked** while the
+AFK implement loop is rolled out (`sql-buddy-afk` / `Jenkinsfile.afk` — see
+[afk/README.md](./afk/README.md) and
+[docs/adr/0005-afk-consumer-park-review.md](./docs/adr/0005-afk-consumer-park-review.md)).
+Sources for review (`Jenkinsfile`, `ci/review_post.py`, review `Dockerfile`)
+remain in git for a later unpark.
+
+When unparked, every newly opened PR gets an automated **Review pass** — the
+Review agent (pi) reads the diff and the code, checks it against the rubric in
+[AGENTS.md](./AGENTS.md), and posts a comment with a verdict label:
 
 - **`agent:approved`** — no blocking or minor issues. Ready for a final human
   review and merge.

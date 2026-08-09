@@ -1,5 +1,10 @@
 // sql-buddy review + sync pipeline — Jenkins job "sql-buddy-review" (cicd.nint.hk)
 //
+// PARKED: disable this job in the Jenkins UI while AFK implement is the active
+// automation (job sql-buddy-afk / Jenkinsfile.afk). Keep this file +
+// ci/review_post.py + Dockerfile in git for a later unpark. See
+// docs/adr/0005-afk-consumer-park-review.md.
+//
 // Trigger: a Gitea "pull request" webhook hits the Generic Webhook Trigger
 // plugin, filtered to opened / reopened / synchronized / ready_for_review /
 // closed PRs. On the first four, the Review agent (pi) reads the diff + repo
