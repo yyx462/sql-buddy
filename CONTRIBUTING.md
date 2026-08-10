@@ -9,8 +9,8 @@ before merge.
 ## Automated Review (parked)
 
 The Jenkins **Review agent** job (`sql-buddy-review`) is **parked** while the
-AFK implement loop is rolled out (`sql-buddy-afk` / `Jenkinsfile.afk` — see
-[afk/README.md](./afk/README.md) and
+shared AFK implement loop is rolled out (Jenkins job **`algo-afk`** / harness
+repo **afk-home** — see
 [docs/adr/0005-afk-consumer-park-review.md](./docs/adr/0005-afk-consumer-park-review.md)).
 Sources for review (`Jenkinsfile`, `ci/review_post.py`, review `Dockerfile`)
 remain in git for a later unpark.
