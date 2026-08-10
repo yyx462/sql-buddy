@@ -164,11 +164,40 @@ def _result_to_json(client, sql: str) -> str:
 
 # --- Schema ---
 
+# MergeTree clause keywords that terminate a DDL value expression. All of these
+# follow the column list in ClickHouse DDL (PARTITION BY / PRIMARY KEY /
+# ORDER BY / SAMPLE BY / SETTINGS / TTL come after `ENGINE = ...`).
+_DDL_CLAUSE_STOP = (
+    r'ENGINE\b|PARTITION\s+BY\b|PRIMARY\s+KEY\b|ORDER\s+BY\b'
+    r'|SAMPLE\s+BY\b|SETTINGS\b|TTL\b'
+)
+
+
+def _extract_ddl_clause(schema: str, clause: str) -> str:
+    """Extract the expression following a CREATE TABLE clause keyword.
+
+    `clause` is a regex fragment such as ``PRIMARY\\s+KEY`` or ``ORDER\\s+BY``.
+    Captures from just after the keyword up to the next sibling clause keyword
+    or end of string. Works for both newline-separated DDL (real
+    ``SHOW CREATE TABLE`` output) and single-line DDL (tests), unlike the old
+    ``[^\n]+?`` regexes that required a trailing newline terminator and so
+    silently returned '' for one-line schemas.
+    """
+    m = re.search(
+        rf'{clause}\s+(.+?)(?=\s+(?:{_DDL_CLAUSE_STOP})|\s*$)',
+        schema, re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return ''
+    return m.group(1).strip().rstrip(',').strip()
+
+
 def _parse_create_table(schema: str) -> dict:
     schema_clean = schema.replace('\\n', '\n')
     result = {
         'table_name': '', 'engine': '', 'partition': '',
-        'order_by': '', 'columns': [], 'projections': []
+        'primary_key': '', 'order_by': '', 'sampling_key': '',
+        'columns': [], 'projections': []
     }
 
     m = re.search(r'CREATE\s+TABLE\s+([\w.`]+)', schema_clean, re.IGNORECASE)
@@ -179,19 +208,19 @@ def _parse_create_table(schema: str) -> dict:
     if m:
         result['engine'] = m.group(1)
 
-    m = re.search(
-        r'PARTITION\s+BY\s+([^\n]+?)(?=\n\s*(?:ORDER|PRIMARY|KEY|ENGINE|SETTINGS)|\n\))',
-        schema_clean, re.IGNORECASE
-    )
-    if m:
-        result['partition'] = m.group(1).strip()
-
-    m = re.search(
-        r'ORDER\s+BY\s+([^\n]+?)(?=\n\s*(?:PRIMARY|KEY|SETTINGS)|\n\))',
-        schema_clean, re.IGNORECASE
-    )
-    if m:
-        result['order_by'] = m.group(1).strip()
+    # PARTITION BY / PRIMARY KEY / ORDER BY / SAMPLE BY live AFTER the column
+    # list in ClickHouse DDL. Restrict the clause search to the tail starting at
+    # ENGINE so a MySQL `PRIMARY KEY (...)` declared *inside* the column list is
+    # never mistaken for a MergeTree sparse-index key. PRIMARY KEY and ORDER BY
+    # are distinct in CH: PRIMARY KEY sets sparse-index granularity (a prefix of
+    # ORDER BY), ORDER BY sets the on-disk sort — filtering on an ORDER BY column
+    # that is NOT in PRIMARY KEY is a full granule scan.
+    engine_match = re.search(r'ENGINE\s*=', schema_clean, re.IGNORECASE)
+    clause_tail = schema_clean[engine_match.start():] if engine_match else schema_clean
+    result['partition'] = _extract_ddl_clause(clause_tail, r'PARTITION\s+BY')
+    result['primary_key'] = _extract_ddl_clause(clause_tail, r'PRIMARY\s+KEY')
+    result['order_by'] = _extract_ddl_clause(clause_tail, r'ORDER\s+BY')
+    result['sampling_key'] = _extract_ddl_clause(clause_tail, r'SAMPLE\s+BY')
 
     for match in re.finditer(
         r'`(\w+)`\s+(\w+(?:\([^)]*\))?)\s*(?:DEFAULT\s+[^\s,]+)?\s*(?:COMMENT\s+\'[^\']*\')?',
@@ -212,18 +241,36 @@ def _parse_create_table(schema: str) -> dict:
     return result
 
 
+# Column names that imply a time column regardless of declared type.
+_TIME_COL_NAMES = {'create_time', 'insert_time', 'update_time'}
+# Type families that mark a column as time-related.
+_TIME_TYPE_RE = re.compile(
+    r'^(DateTime64|DateTime|Date32|Date|Timestamp|TIMESTAMP)', re.IGNORECASE
+)
+
+
 def _extract_time_columns(schema: str) -> list:
+    """Return time-related column names from a CREATE TABLE statement.
+
+    A column is time-related if its name is create_time/insert_time/update_time
+    or its declared type is a Date/DateTime/Timestamp family type. Names are
+    returned clean — never a bare backtick or a `` `col` `` token. The old
+    heuristic grabbed the whitespace token preceding a keyword and could yield
+    ``"`"`` (a lone backtick, from the opening quote of `` `insert_time` ``) or
+    ``"`insert_time`"`` (backtick-wrapped); this scans real column definitions
+    instead and strips surrounding quotes/punctuation by construction.
+    """
     time_cols = []
-    schema_lower = schema.lower()
-    for kw in ['create_time', 'insert_time', 'update_time', 'date', 'datetime', 'timestamp']:
-        if kw in schema_lower:
-            idx = schema_lower.find(kw)
-            segment = schema[max(0, idx - 30):idx]
-            parts = segment.replace(',', ' ').split()
-            if parts:
-                col = parts[-1].strip()
-                if col and col not in time_cols:
-                    time_cols.append(col)
+    seen = set()
+    # A column definition: an optional backtick-quoted identifier then a type.
+    col_pattern = re.compile(r'`?(\w+)`?\s+(\w+(?:\([^)]*\))?)')
+    for m in col_pattern.finditer(schema):
+        col, ctype = m.group(1), m.group(2)
+        if col in seen:
+            continue
+        if col.lower() in _TIME_COL_NAMES or _TIME_TYPE_RE.match(ctype):
+            seen.add(col)
+            time_cols.append(col)
     return time_cols
 
 
@@ -273,6 +320,79 @@ def table_schema_query(tbl_name: str, connection: str = 'ck', force_refresh: boo
 
 # --- Table Info ---
 
+def _resolve_connection_type(connection: str) -> str:
+    """Resolve a connection name to its DBMS type ('clickhouse' | 'mysql').
+
+    Replaces the brittle ``hasattr(client, 'query_dataframe')`` dispatch: BOTH
+    Locked wrappers define ``query_dataframe`` (MySQL natively, ClickHouse via
+    the adapter in connections/wrappers.py), so that attribute check *always*
+    picked the MySQL branch — even for ClickHouse, which then fabricated a
+    fake PRIMARY index from ClickHouse's stub ``SHOW INDEX``. This reads the
+    section's declared ``type`` (with the section-name prefix fallback), the
+    same source of truth ``find_table_query`` uses. Connection names use
+    underscores; db.ini sections use dashes, so normalize the way
+    DBManager.__getattr__ does.
+    """
+    cfg = DBManager.load_config(CONFIG_FILE)
+    section = connection.replace('_', '-')
+    return connection_type(cfg, section)
+
+
+def _split_qualified_table(tbl_name: str) -> tuple:
+    """Split a (possibly db-qualified) table name into (database, table).
+
+    ``asia.elevenst_kr_seo_result`` -> ``('asia', 'elevenst_kr_seo_result')``.
+    Backticks are stripped. Unqualified names return ``('', name)``.
+    """
+    tbl = tbl_name.strip().strip('`')
+    if '.' in tbl:
+        db_part, _, tbl_part = tbl.partition('.')
+        return db_part.strip('`'), tbl_part.strip('`')
+    return '', tbl
+
+
+def _clickhouse_parts(client, tbl_name: str) -> list:
+    """Active parts for a ClickHouse table, read from ``system.parts``.
+
+    Returns up to 20 rows of ``{partition, name, rows, bytes_on_disk}`` — the
+    real scan-cost signals (partition count, part count, row distribution) that
+    ``SHOW PARTITIONS FROM <table>`` could never provide (it is invalid
+    ClickHouse syntax: ``Code: 62. DB::Exception ... PARTITIONS``). Uses
+    parameter binding for the identifiers so a mistyped/malicious name can never
+    inject SQL, and falls back to ``currentDatabase()`` when the name is
+    unqualified. Returns ``[]`` on error (never raises) so ``get_info`` still
+    reports ``row_count``.
+    """
+    db_part, tbl_part = _split_qualified_table(tbl_name)
+    if db_part:
+        sql = (
+            "SELECT partition, name, rows, bytes_on_disk "
+            "FROM system.parts "
+            "WHERE database = %(db)s AND table = %(tbl)s AND active = 1 "
+            "ORDER BY partition, name "
+            "LIMIT 20"
+        )
+        params = {'db': db_part, 'tbl': tbl_part}
+    else:
+        sql = (
+            "SELECT partition, name, rows, bytes_on_disk "
+            "FROM system.parts "
+            "WHERE database = currentDatabase() AND table = %(tbl)s AND active = 1 "
+            "ORDER BY partition, name "
+            "LIMIT 20"
+        )
+        params = {'tbl': tbl_part}
+    try:
+        result = client.execute(sql, params, with_column_types=True)
+    except Exception:
+        return []
+    if not result or not result[0]:
+        return []
+    data, columns = result
+    col_names = [c[0] for c in columns]
+    return [_sanitize_row(dict(zip(col_names, row))) for row in data]
+
+
 def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool = False) -> dict:
     cache_file = _get_cache_file_path('info', connection)
     cache = _load_json_safe(cache_file)
@@ -285,9 +405,11 @@ def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool 
     try:
         db = DBManager()
         client = getattr(db, connection)
+        ctype = _resolve_connection_type(connection)
         info = {'table_name': tbl_name, 'cached_at': datetime.now().isoformat()}
 
-        if hasattr(client, 'query_dataframe'):
+        if ctype == 'mysql':
+            # MySQL: SHOW INDEX returns real BTREE indexes with real cardinality.
             try:
                 result = client.query_dataframe(f"SELECT COUNT(*) as cnt FROM {tbl_name}")
                 info['row_count'] = int(result['cnt'].iloc[0]) if not result.empty else 0
@@ -300,16 +422,18 @@ def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool 
             except Exception:
                 info['indexes'] = []
         else:
+            # ClickHouse has no MySQL-style PRIMARY index: PRIMARY KEY only sets
+            # sparse-index granularity (no uniqueness, no lookup), and SHOW INDEX
+            # returns a stub that fabricates a fake PRIMARY key with cardinality
+            # 0 — which misleads agents into wrong join-cost estimates. So we do
+            # NOT synthesize `indexes`; we report real scan-cost signals from
+            # system.parts (partition / parts / rows per part) instead.
             try:
                 result = client.execute(f"SELECT count() as cnt FROM {tbl_name}")
                 info['row_count'] = result[0][0] if result else 0
             except Exception:
                 info['row_count'] = None
-            try:
-                part_result = client.execute(f"SHOW PARTITIONS FROM {tbl_name}")
-                info['partitions'] = str(part_result[:5])
-            except Exception:
-                info['partitions'] = None
+            info['parts'] = _clickhouse_parts(client, tbl_name)
 
         cache[tbl_name] = info
         _save_json_safe(cache_file, cache)
