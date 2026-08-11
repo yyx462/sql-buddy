@@ -38,19 +38,40 @@ SQL Buddy runs **locally** (a small Python program, not a cloud service). It
 
 ## Quickstart
 
+**Install** (current release **0.3.3**, Python ≥ 3.11):
+
 ```bash
-git clone <this-repo-url> sql-buddy && cd sql-buddy
-uv run server.py            # installs deps into an isolated .venv, then serves (Ctrl+C to stop)
-uv run sql-buddy init       # interactive wizard → writes connections/config/db.ini
-uv run sql-buddy doctor --connect   # green-checks the venv, db.ini, tunnels, MCP client config
-uv run sql-buddy mcp add    # registers sql-buddy with Claude Code (writes .mcp.json)
+# From PyPI (recommended):
+pip install sqlbuddy-nwi          # provides the `sql-buddy` command
+# …or run the latest instantly without installing:
+uvx --from sqlbuddy-nwi sql-buddy
 ```
+
+```bash
+# From source (for development):
+git clone https://github.com/yyx462/sql-buddy && cd sql-buddy
+uv run server.py                  # auto-provisions an isolated .venv, then serves
+```
+
+**Configure & connect:**
+
+```bash
+sql-buddy init                    # interactive wizard → writes connections/config/db.ini
+sql-buddy doctor --connect        # green-checks db.ini, tunnels, MCP client config
+sql-buddy mcp add                 # registers sql-buddy with Claude Code (writes .mcp.json)
+```
+
+> From a **git checkout**, prefix these with `uv run` (e.g. `uv run sql-buddy init`).
+> From a **pip / uvx install**, run `sql-buddy` directly — it's on your PATH.
 
 Restart your client, then ask your agent *"list the tables in the `ck`
 connection"* — if it answers, you're live. 🎉
 
 > **Bare `sql-buddy` (no command) runs the MCP server** — that's what your AI
 > client invokes, so configs hold no fragile absolute `.venv/bin/python` path.
+> `sql-buddy mcp add` auto-detects how you installed and writes the right
+> command: `uvx --from sqlbuddy-nwi sql-buddy` for a pip/uvx install,
+> `uv --directory … run server.py` for a checkout.
 > Other commands: `version`, `doctor [--connect]`, `mcp print|add`, `update-check`, `init`.
 > On **Windows**, see [`docs/windows-trae.md`](docs/windows-trae.md) and use
 > `sql-buddy mcp add --client trae`.
@@ -62,8 +83,8 @@ connection"* — if it answers, you're live. 🎉
 Run the wizard (easiest) or copy the template:
 
 ```bash
-uv run sql-buddy init
-# or by hand:
+sql-buddy init
+# or, from a git checkout, copy the template and edit by hand:
 cp connections/config/db.ini.example connections/config/db.ini
 $EDITOR connections/config/db.ini
 ```
@@ -111,13 +132,13 @@ reference, SSH troubleshooting, and External (`ssh -N`) mode, see
 ## Connect your AI agent
 
 ```bash
-uv run sql-buddy mcp add                      # Claude Code project → ./.mcp.json
-uv run sql-buddy mcp add --scope user         # Claude Code user    → ~/.claude.json
-uv run sql-buddy mcp add --client trae        # Trae project        → ./.trae/mcp.json
-uv run sql-buddy mcp add --client trae --scope user   # Trae user-global
+sql-buddy mcp add                      # Claude Code project → ./.mcp.json
+sql-buddy mcp add --scope user         # Claude Code user    → ~/.claude.json
+sql-buddy mcp add --client trae        # Trae project        → ./.trae/mcp.json
+sql-buddy mcp add --client trae --scope user   # Trae user-global
 ```
 
-Restart your client. Preview the exact block first with `uv run sql-buddy mcp print`
+Restart your client. Preview the exact block first with `sql-buddy mcp print`
 (paths filled in):
 
 ```json
