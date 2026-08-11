@@ -1,8 +1,7 @@
 # Releases publish to PyPI via GitHub Actions + Trusted Publishing (OIDC)
 
 The repo's source of truth is company Gitea (`git.sh.nint.com`), mirrored to
-GitHub; the existing Jenkins pipeline is review-agent-only and there is no
-release pipeline. Releases are cut by pushing a semver git tag, which mirrors
+GitHub. Releases are cut by pushing a semver git tag, which mirrors
 to GitHub and triggers a GitHub Actions workflow that builds the sdist+wheel
 and publishes to PyPI via Trusted Publishing (OIDC) — no stored PyPI
 credential anywhere.
@@ -37,11 +36,6 @@ the trusted CI is available without moving the repo off Gitea.
   no separate mirror step or refspec needed. (Sanctioned fallback if this ever
   breaks: migrate the source of truth to GitHub — one home for source + CI +
   releases — rather than patching the mirror.)
-- If that fallback is taken, GitHub becomes both source of truth and release
-  runner; the one coupling to check on migration is the **Jenkins
-  review-agent pipeline** (`Jenkinsfile`), which today polls Gitea. It is
-  review-only, so re-pointing it to the GitHub remote (or retiring it in favor
-  of a GitHub Actions review workflow) is viable.
 - Versioning stays a deliberate static literal in `_version.py` +
   `pyproject.toml` (per the existing rationale: vendored/offline/bare
   `python server.py` runs must report a version); the release workflow bumps

@@ -6,44 +6,12 @@ You (or your agent) can open pull requests without asking first. There is no
 gatekeeper. Prefer a human or agent self-check against [AGENTS.md](./AGENTS.md)
 before merge.
 
-## Automated Review (parked)
-
-The Jenkins **Review agent** job (`sql-buddy-review`) is **parked** while the
-shared AFK implement loop is rolled out (Jenkins job **`algo-afk`** / harness
-repo **afk-home** — see
-[docs/adr/0005-afk-consumer-park-review.md](./docs/adr/0005-afk-consumer-park-review.md)).
-Sources for review (`Jenkinsfile`, `ci/review_post.py`, review `Dockerfile`)
-remain in git for a later unpark.
-
-When unparked, every newly opened PR gets an automated **Review pass** — the
-Review agent (pi) reads the diff and the code, checks it against the rubric in
-[AGENTS.md](./AGENTS.md), and posts a comment with a verdict label:
-
-- **`agent:approved`** — no blocking or minor issues. Ready for a final human
-  review and merge.
-- **`needs-work`** — blocking issues found (read-only invariant, secret safety,
-  correctness). Please address them.
-- **`good-attempt`** — only non-blocking minor issues (naming, style,
-  terminology). Mergeable after small cleanups.
-- **`review-error`** — the automated review could not complete. A human will
-  take a look.
-
-## What is NOT reviewed automatically
-
-These PRs are skipped (the Review agent will not run on them):
-
-- **PRs authored by the maintainer** (`ying.yuxiang`) — self-reviewed.
-- **Draft PRs** — mark your PR as draft to opt out. It will be reviewed
-  automatically once you mark it "ready for review."
-- **PRs with the `skip-review` label** — add this label to any PR you don't
-  want auto-reviewed.
-
 ## Before you code
 
 If you're planning a non-trivial change, consider walking through your design
 first — either with a colleague or with an AI agent using a "grilling" or
 "design review" skill. A few minutes of design pressure up front saves a
-`needs-work` label and a rewrite cycle.
+rewrite cycle.
 
 ## Coding standards
 
@@ -85,7 +53,7 @@ git diff --cached | grep -nE \
 ```
 
 If anything that matches is a real value (not one of the placeholders above), stop
-and redact before pushing. The Review agent does NOT check for this — humans must.
+and redact before pushing.
 
 If a leak has already been pushed: do **not** just fix it in a follow-up commit.
 That leaves the original in history. Open a PR to rewrite history (`git filter-repo
@@ -96,5 +64,4 @@ That leaves the original in history. Open a PR to rewrite history (`git filter-r
 
 ## Merging
 
-Only a human merges. The Review agent never merges — it only reviews and
-labels. Even an `agent:approved` PR needs a quick human sign-off before merge.
+Only a human merges. Every PR needs a quick human sign-off before merge.

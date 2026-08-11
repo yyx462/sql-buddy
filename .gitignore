@@ -20,10 +20,3 @@ database/
 .env.local
 tmp/
 .yyx-meta.json
-
-# AFK harness (local secrets, node install, tea isolated config)
-afk/node_modules/
-afk/.sandcastle/.env
-afk/.sandcastle/.prompt.filled.md
-afk/.tea-config/
-afk/.tea-config-test/

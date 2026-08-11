@@ -1,6 +1,0 @@
-node_modules/
-.sandcastle/.env
-.sandcastle/.prompt.filled.md
-.sandcastle/logs/
-.tea-config/
-*.log

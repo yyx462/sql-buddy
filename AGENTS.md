@@ -1,9 +1,9 @@
 # AGENTS.md — SQL Buddy
 
-This file is read by both humans and the Review agent (pi). It defines the
-coding standards AND the review rubric in one place so they never drift.
-The full domain language (Connection, Query, Locked layer, etc.) lives in
-`UBIQUITOUS_LANGUAGE.md` — read it before touching anything security-sensitive.
+This file defines the coding standards and the review rubric in one place so
+they never drift. The full domain language (Connection, Query, Locked layer,
+etc.) lives in `UBIQUITOUS_LANGUAGE.md` — read it before touching anything
+security-sensitive.
 
 ## What SQL Buddy is
 
@@ -15,14 +15,8 @@ read-only invariant — protect it above all else.
 ## Review rubric
 
 When reviewing a pull request, classify each finding into one of two tiers.
-The pipeline derives the verdict label from the tiers (the agent does NOT pick
-the label itself):
 
-- **Any Tier-1 finding → `needs-work`**
-- **Else any Tier-2 finding → `good-attempt`**
-- **Else → `agent:approved`**
-
-### Tier 1 — Blocking (→ `needs-work`)
+### Tier 1 — Blocking
 
 1. **Read-only invariant.** Any code path that could send a Write keyword
    (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`,
@@ -47,7 +41,7 @@ the label itself):
    need a configured DB connection are skipped when that connection is absent.
    A tool PR with no tests is incomplete.
 
-### Tier 2 — Minor (→ `good-attempt` if no Tier 1)
+### Tier 2 — Minor
 
 5. **Ubiquitous-language discipline.** Reintroducing retired terms
    (`db_name`, `list_databases`, calling a namespace a "schema") or conflating
@@ -68,21 +62,3 @@ the label itself):
 
 Trivial nitpicks (a missing trailing newline, subjective preference) are
 **ignored, not commented**. Keep comments signal-heavy.
-
-## Output contract
-
-When invoked as the Review agent, output ONLY a JSON object — no prose, no
-markdown fences:
-
-```json
-{
-  "summary": "One-paragraph overall assessment of the PR.",
-  "findings": [
-    {"tier": 1, "path": "db_query.py", "line": 142, "message": "Bypasses the Locked layer."},
-    {"tier": 2, "path": "server.py", "line": 30, "message": "Uses retired term 'db_name'."}
-  ]
-}
-```
-
-If there are no findings: `{"summary": "...", "findings": []}`. The pipeline
-reads this JSON, derives the label from the tiers, and posts the comment.
