@@ -1,0 +1,93 @@
+name: Bug report
+description: Report something that is broken or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. A few notes first:
+        - SQL Buddy is **read-only by design**. If your issue is that `INSERT` /
+          `UPDATE` / `DELETE` / `DROP` etc. are rejected, that is intended, not a bug.
+        - **Never paste real credentials, SSH keys, hostnames, or IPs.** Use the
+          placeholders from [`CONTRIBUTING.md`](../../CONTRIBUTING.md)
+          (e.g. `bastion.example.com`, `10.0.0.21`).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the unexpected behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: What you thought would happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The smallest set of steps that triggers it. If you can, include the
+        MCP tool call or SQL (redacted) that triggered it.
+      placeholder: |
+        1. Ran `sql-buddy doctor --connect` against connection `ck`
+        2. Asked the agent: "..."
+        3. Got error: ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "`sql-buddy --version` output"
+      placeholder: "0.3.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: dbtype
+    attributes:
+      label: Database type
+      options:
+        - ClickHouse
+        - MySQL
+        - Both / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tunnel
+    attributes:
+      label: Connection / tunnel mode
+      description: |
+        How sql-buddy reaches the database.
+      options:
+        - Auto — sql-buddy opens its own SSH tunnel
+        - External — I run `ssh -N` myself
+        - Direct — no tunnel (DB reachable directly)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version & OS
+      placeholder: "Python 3.12.4, Ubuntu 24.04"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log / error output
+      description: Paste the error or log lines. Redact any secrets, hosts, IPs first.
+      render: shell
+    validations:
+      required: false
