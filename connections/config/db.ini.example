@@ -1,0 +1,71 @@
+# Database Configuration Template
+# Copy this file to db.ini and fill in your actual credentials
+# IMPORTANT: Never commit db.ini to version control!
+#
+# Each [section] is a "connection" (a configured DB endpoint). Connections
+# behind a bastion/jump-host declare `tunnel = ssh:<name>` and a remote/local
+# port mapping; sql-buddy opens the SSH tunnel itself (see the [ssh:*] block
+# below). Connections with no `tunnel` key connect directly (legacy behavior).
+#
+# Set `type = clickhouse|mysql` explicitly. If omitted, type is inferred from
+# the section-name prefix (ck* -> clickhouse, db*/mysql* -> mysql).
+
+# --- SSH bastion (one section per jump-host) -------------------------------
+# A `[ssh:<name>]` block describes how to SSH into the bastion. Every DB
+# connection that sets `tunnel = ssh:<name>` contributes a `-L` forward to a
+# SINGLE ssh process for that bastion. Key-based auth only (the `-i` path).
+
+[ssh:prod]
+host = bastion.example.com       # the bastion / jump-host you ssh into
+port = 22                        # ssh port (default 22)
+user = your_ssh_user
+key  = ~/.ssh/id_ed25519         # path to your private key (~ expanded)
+server_alive_interval = 30       # optional, default 30 - keepalive ping
+server_alive_count_max = 3       # optional, default 3  - drops after N misses
+
+# --- Tunneled connections -------------------------------------------------
+# `remote_host`/`remote_port` are the DB AS SEEN FROM the bastion (inside the
+# network). `local_port` is the port sql-buddy binds on localhost AND the port
+# the DB driver connects to. No separate `host`/`port` keys needed.
+
+[ck]
+type        = clickhouse
+tunnel      = ssh:prod
+remote_host = 10.0.0.21
+remote_port = 9000
+local_port  = 10021
+user        = your_clickhouse_user
+password    = your_clickhouse_password
+database    = default
+
+[ck-tk]
+type        = clickhouse
+tunnel      = ssh:prod
+remote_host = 10.0.0.56
+remote_port = 9000
+local_port  = 10056
+user        = your_clickhouse_user
+password    = your_clickhouse_password
+
+[mysql-rw]
+type        = mysql
+tunnel      = ssh:prod
+remote_host = 10.0.0.95
+remote_port = 3306
+local_port  = 10095
+user        = your_mysql_user
+password    = your_mysql_password
+database    = myapp
+
+# --- Direct (non-tunneled) connection -------------------------------------
+# A connection with no `tunnel` key connects directly via `host`/`port`. This
+# is the legacy behavior and still works (the WSL host-override applies when
+# running inside WSL). Use it when a DB is already reachable without SSH.
+
+[local-db]
+type     = mysql
+host     = localhost
+port     = 3306
+user     = your_mysql_user
+password = your_mysql_password
+database = myapp

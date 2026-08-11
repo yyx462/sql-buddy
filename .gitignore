@@ -1,0 +1,22 @@
+**/*.pyc
+**/__pycache__/
+.venv/
+*.egg-info/
+database/
+
+# Database config files (never commit credentials!)
+**/db.ini
+**/db.ini.bak*
+*.ini
+*.ini.bak
+*.ini.bak*
+*.bak
+*.bak[0-9]*
+# mcp add backups of client configs (may hold third-party API tokens)
+.mcp.json.bak*
+*.json.bak*
+*.json.bak[0-9]*
+.env
+.env.local
+tmp/
+.yyx-meta.json
