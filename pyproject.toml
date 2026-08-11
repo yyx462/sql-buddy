@@ -1,0 +1,56 @@
+[project]
+name = "sqlbuddy-nwi"
+version = "0.3.3"
+description = "MCP server for read-only database access (MySQL, ClickHouse)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ying.yuxiang" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    # mcp 2.0 removed `mcp.server.fastmcp`; server.py uses the 1.x API. Cap until
+    # the 2.x port is done (tracked separately). Without this, fresh installs
+    # pull 2.0.0 and the server crashes on `from mcp.server.fastmcp import FastMCP`.
+    "mcp>=1.0.0,<2",
+    "pymysql>=1.1.0",
+    "clickhouse-driver>=0.2.6",
+    "pandas>=2.0.0",
+    "platformdirs>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yyx462/sql-buddy"
+Repository = "https://github.com/yyx462/sql-buddy"
+Issues = "https://github.com/yyx462/sql-buddy/issues"
+
+# Explicit build backend + module list. The repo uses a *flat layout*
+# (top-level .py files + the `connections` package), so we must declare the
+# modules explicitly — otherwise setuptools auto-discovery only registers
+# `connections`, and `import cli` / `import server` fail from the installed
+# console scripts (which don't have the repo dir on sys.path). `python
+# server.py` keeps working regardless (the script dir is on sys.path).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server", "cli", "init", "db_query", "db_security", "tunnel", "_version", "test_vendor"]
+packages = ["connections"]
+
+# Entry points. `sql-buddy` with no args runs the MCP server (so MCP client
+# configs keep working); subcommands (doctor, mcp, version, update-check) are
+# dispatched by cli.main. `sql-buddy-init` is the interactive setup wizard.
+[project.scripts]
+sql-buddy = "cli:main"
+sql-buddy-init = "init:main"

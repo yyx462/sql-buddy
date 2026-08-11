@@ -1,0 +1,35 @@
+name: test
+
+# "Infinite clean machines": install sql-buddy from source on a matrix of OSes
+# and Python versions, then confirm the `sql-buddy` console script runs. Each
+# cell is a pristine VM with no shared home dir / cache / pre-installed state,
+# so it catches cross-platform install issues and fresh-user config discovery
+# that a local venv (which shares ~/.config and the uv cache) cannot.
+#
+# This does NOT publish. The release workflow (.github/workflows/release.yml)
+# does the PyPI upload on tags.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install from source (exercises pyproject metadata + entry points)
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Console script runs
+        run: sql-buddy version
+      - name: MCP entry builds (installed, non-checkout mode)
+        run: sql-buddy mcp print

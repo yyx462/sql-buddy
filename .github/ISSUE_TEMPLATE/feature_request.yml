@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a new tool, behaviour, or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that sql-buddy currently makes hard or impossible?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you'd like sql-buddy to do instead. A concrete example (SQL / MCP tool call) helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Workarounds you use today, or other tools that solve this.
+    validations:
+      required: false

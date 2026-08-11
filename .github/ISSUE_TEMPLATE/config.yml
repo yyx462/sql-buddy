@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/yyx462/sql-buddy/security/advisories/new
+    about: Found a way to bypass the read-only layer or leak credentials? Report it privately — do not open a public issue.
+  - name: Setup & troubleshooting docs
+    url: https://github.com/yyx462/sql-buddy/blob/master/docs/setup.md
+    about: SSH tunnels, db.ini field reference, Windows/Trae notes — check here before filing.
