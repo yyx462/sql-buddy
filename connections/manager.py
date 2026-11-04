@@ -135,10 +135,27 @@ class DBManager:
         return conn_config
 
     def _create_clickhouse_client(self, section: str) -> Client:
-        return Client(**self._resolve_conn_config(section, 9000))
+        cfg = self._resolve_conn_config(section, 9000)
+        # Default timeouts: a black-holed endpoint (dead tunnel forward, silent
+        # DB) must raise instead of parking the caller's worker thread in a
+        # socket read forever. Explicit keys in the db.ini section win.
+        cfg.setdefault('connect_timeout', 10)
+        cfg.setdefault('send_receive_timeout', 900)
+        for k in ('connect_timeout', 'send_receive_timeout'):
+            cfg[k] = int(cfg[k])  # ini values arrive as strings; drivers want ints
+        return Client(**cfg)
 
     def _create_mysql_client(self, section: str) -> MySQLConnectionWrapper:
-        return MySQLConnectionWrapper(pymysql.connect(**self._resolve_conn_config(section, 3306)))
+        cfg = self._resolve_conn_config(section, 3306)
+        # Same bounds for MySQL; read/write must exceed the 600s
+        # innodb_lock_wait_timeout the locked wrapper sets, so legit
+        # lock-waits are not cut short.
+        cfg.setdefault('connect_timeout', 10)
+        cfg.setdefault('read_timeout', 900)
+        cfg.setdefault('write_timeout', 900)
+        for k in ('connect_timeout', 'read_timeout', 'write_timeout'):
+            cfg[k] = int(cfg[k])  # ini values arrive as strings; drivers want ints
+        return MySQLConnectionWrapper(pymysql.connect(**cfg))
 
     def all_clients(self) -> Dict[str, Any]:
         return {name: entry['client'] for name, entry in self._cache.items()}
