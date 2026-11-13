@@ -1024,6 +1024,10 @@ sql-buddy {ver}  — read-only MCP database server
 
 Usage:
   sql-buddy [serve|stdio]        run the MCP server over stdio (default)
+  sql-buddy http [--host H] [--port P]
+                                 run ONE shared MCP server over streamable
+                                 HTTP — N agents, one process, one tunnel
+                                 (default 127.0.0.1:7801; see docs/setup.md)
   sql-buddy version              print version
   sql-buddy doctor [--connect]   validate install + db.ini (+ live pings)
   sql-buddy update-check         compare local checkout to the git remote
@@ -1056,10 +1060,32 @@ def _run_server() -> int:
     return 0
 
 
+def _run_http(host: str, port: int) -> int:
+    import server
+    server.run_http(host=host, port=port)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ("serve", "server", "stdio"):
         return _run_server()
+    if args[0] == "http":
+        host, port = "127.0.0.1", 7801
+        it = iter(args[1:])
+        for flag in it:
+            if flag == "--host":
+                host = next(it, host)
+            elif flag == "--port":
+                raw = next(it, "")
+                if not raw.isdigit():
+                    print("error: --port needs an integer", file=sys.stderr)
+                    return 2
+                port = int(raw)
+            else:
+                print(f"error: unknown http option '{flag}'", file=sys.stderr)
+                return 2
+        return _run_http(host, port)
 
     cmd, rest = args[0], args[1:]
 

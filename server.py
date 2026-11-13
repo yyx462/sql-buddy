@@ -263,6 +263,25 @@ def run_server():
     mcp.run(transport="stdio")
 
 
+def run_http(host: str = "127.0.0.1", port: int = 7801):
+    """Run ONE shared MCP server over streamable HTTP (`sql-buddy http`).
+
+    Every agent connects to http://host:port/mcp — one process, one ssh
+    tunnel, one set of local forward ports, so concurrent agents can never
+    collide on tunnel port binds the way N stdio processes do. Requests are
+    independent: each tool call builds its own DBManager/client (db_query),
+    so there is no shared-connection state between agents.
+
+    Trade-off vs stdio: shared fate. If this process dies, every agent loses
+    DB access until it restarts — run it under a supervisor (systemd --user
+    with Restart=always; see docs/setup.md). Binds localhost by default;
+    do not expose it to a network without an auth layer in front.
+    """
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.run(transport="streamable-http")
+
+
 if __name__ == "__main__":
     # Bare `python server.py` (or `python server.py serve`) starts the MCP
     # server — the common case for MCP client configs. Any other subcommand
