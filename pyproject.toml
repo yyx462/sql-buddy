@@ -54,3 +54,9 @@ packages = ["connections"]
 [project.scripts]
 sql-buddy = "cli:main"
 sql-buddy-init = "init:main"
+
+# Only `tests/` holds pytest tests. Without this, bare `pytest` also collects
+# the root-level test_vendor.py script, whose import-time sys.exit(1) crashes
+# the whole run with an INTERNALERROR.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
