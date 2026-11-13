@@ -38,7 +38,7 @@ SQL Buddy runs **locally** (a small Python program, not a cloud service). It
 
 ## Quickstart
 
-**Install** (current release **0.3.3**, Python ≥ 3.11):
+**Install** (current release [![PyPI](https://img.shields.io/pypi/v/sqlbuddy-nwi.svg)](https://pypi.org/project/sqlbuddy-nwi/), Python ≥ 3.11):
 
 ```bash
 # From PyPI (recommended):
