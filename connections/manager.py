@@ -10,7 +10,6 @@ generation bumps (the previous TCP socket is dead after a restart).
 import configparser
 import os
 import sys
-import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, Tuple
 
@@ -29,7 +28,21 @@ from .wrappers import (
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from tunnel import get_manager as _get_tunnel_manager
+
+
+def _get_tunnel_manager():
+    """Return the process-wide TunnelManager (imported lazily).
+
+    A module-level `from tunnel import get_manager` here creates a genuine
+    import cycle: `import tunnel` -> `connections.config_util` ->
+    `connections/__init__` -> manager -> `from tunnel import get_manager`
+    while tunnel is still mid-initialization. tunnel.py's `except ImportError`
+    then silently swallows the collision and its config helpers stay None,
+    breaking every TunnelManager built in that process. Deferring the import
+    to call time breaks the cycle, so `import tunnel` works in any order.
+    """
+    from tunnel import get_manager
+    return get_manager()
 
 
 DEFAULT_REMOTE_DB_CREDS: Dict[str, Tuple[str, str]] = {}
@@ -167,35 +180,6 @@ class DBManager:
                 client.disconnect()
             elif hasattr(client, "close"):
                 client.close()
-
-    @contextmanager
-    def session_scope(self, client_name: str = 'ck'):
-        client = getattr(self, client_name)
-        session_id = str(uuid.uuid4())
-        original_execute = client.execute
-        original_query_dataframe = getattr(client, 'query_dataframe', None)
-
-        def scoped_execute(query, params=None, settings=None, **kwargs):
-            if settings is None:
-                settings = {}
-            settings['session_id'] = session_id
-            return original_execute(query, params=params, settings=settings, **kwargs)
-
-        def scoped_query_dataframe(query, params=None, settings=None, **kwargs):
-            if settings is None:
-                settings = {}
-            settings['session_id'] = session_id
-            return original_query_dataframe(query, params=params, settings=settings, **kwargs)
-
-        class SessionClient:
-            def execute(self, *args, **kwargs):
-                return scoped_execute(*args, **kwargs)
-            def query_dataframe(self, *args, **kwargs):
-                if original_query_dataframe:
-                    return scoped_query_dataframe(*args, **kwargs)
-                raise AttributeError("query_dataframe not available on this client")
-
-        yield SessionClient()
 
     @contextmanager
     def transaction_scope(self, connection: str):

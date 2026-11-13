@@ -138,14 +138,24 @@ class TunnelManager:
         self._gen: dict = {}               # {block: generation int}
         self._stderr_tail: dict = {}       # {block: [lines]}
         self._loaded = False
+        self._cfg_mtime: float | None = None
         self._atexit_registered = False
 
     # -- config --
     def _load(self):
-        if self._loaded:
+        # Re-read when the file changed on disk (e.g. the user migrated a
+        # section to `tunnel =` while this process was already running):
+        # a stale singleton would keep answering block_for() from the old
+        # mapping and silently route tunneled connections to the wrong host.
+        try:
+            mtime = os.path.getmtime(self._config_file)
+        except OSError:
+            mtime = None
+        if self._loaded and mtime == self._cfg_mtime:
             return
         cfg = _read_config(self._config_file)
         self._cfg = cfg
+        self._cfg_mtime = mtime
         self._blocks = _ssh_blocks(cfg)
         self._conn_tunnels = _conn_tunnels(cfg)
         self._loaded = True
@@ -288,7 +298,12 @@ class TunnelManager:
             stream = proc.stderr
             if stream is None:
                 return
-            for line in iter(stream.readline, ''):
+            # readline() on a binary pipe returns b'' at EOF; a '' sentinel
+            # would never match, so the thread would busy-spin forever after
+            # ssh exits while appending empty lines that displace the real
+            # diagnostics from the tail.
+            sentinel = b'' if isinstance(stream.read(0), bytes) else ''
+            for line in iter(stream.readline, sentinel):
                 if isinstance(line, bytes):
                     line = line.decode('utf-8', errors='replace')
                 with self._lock:

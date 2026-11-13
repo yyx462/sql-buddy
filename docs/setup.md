@@ -326,3 +326,52 @@ uv run server.py                  # re-syncs deps if they changed
 
 `sql-buddy version` prints what you're running. Your `db.ini` is never touched by
 an update — it's gitignored and lives outside the tracked code.
+
+---
+
+## Shared HTTP server (many agents, one process)
+
+Stdio mode (the default) spawns **one `server.py` per agent session** — fine
+for one or two agents, but each process opens its **own** ssh tunnel and the
+tunnels bind the same fixed `local_port`s, so concurrent agents collide and
+all but the first lose tunneled DB access. `http` mode runs **one shared
+server** every agent connects to:
+
+```bash
+sql-buddy http                     # 127.0.0.1:7801 (loopback only)
+sql-buddy http --port 7900         # custom port
+```
+
+Point MCP clients at `http://127.0.0.1:7801/mcp` (streamable HTTP), e.g. for
+opencode:
+
+```json
+{ "mcpServers": { "sql-buddy": { "type": "remote",
+  "url": "http://127.0.0.1:7801/mcp", "enabled": true } } }
+```
+
+One process → one tunnel → no port collisions, and each tool call builds its
+own DB client, so agents never share connection state.
+
+**Trade-off — shared fate:** if the server dies, every agent loses DB access
+until it restarts. Run it under a supervisor:
+
+```ini
+# ~/.config/systemd/user/sql-buddy.service
+[Unit]
+Description=sql-buddy shared MCP server
+[Service]
+ExecStart=%h/.local/bin/sql-buddy http
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now sql-buddy
+```
+
+The server binds `127.0.0.1` by default. **Do not** expose it to a network
+(`--host 0.0.0.0`) without an auth layer in front — it can read every
+database in your `db.ini`.

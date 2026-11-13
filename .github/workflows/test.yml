@@ -33,3 +33,5 @@ jobs:
         run: sql-buddy version
       - name: MCP entry builds (installed, non-checkout mode)
         run: sql-buddy mcp print
+      - name: Unit tests (no network; live-DB goldens auto-skip without db.ini)
+        run: python -m pip install pytest && python -m pytest tests/ -q
