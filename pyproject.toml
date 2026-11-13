@@ -25,7 +25,6 @@ dependencies = [
     "mcp>=1.0.0,<2",
     "pymysql>=1.1.0",
     "clickhouse-driver>=0.2.6",
-    "pandas>=2.0.0",
     "platformdirs>=4.0.0",
 ]
 

@@ -44,7 +44,6 @@ _RUNTIME_DEPS = [
     ("mcp", "mcp.server.fastmcp"),
     ("pymysql", None),
     ("clickhouse_driver", None),
-    ("pandas", None),
     ("platformdirs", None),
 ]
 

@@ -10,7 +10,6 @@ See UBIQUITOUS_LANGUAGE.md: "Locked" == the wrapper layer enforcing Read-only.
 
 import pymysql
 from clickhouse_driver import Client
-import pandas as pd
 
 from .readonly import _filter_sql
 
@@ -31,12 +30,19 @@ class MySQLConnectionWrapper:
         finally:
             cursor.close()
 
-    def query_dataframe(self, sql: str) -> pd.DataFrame:
+    def query_rows(self, sql: str):
+        """Read `sql` and return (column_names, rows_as_dicts).
+
+        Replaces the old `query_dataframe` (which wrapped these same rows in a
+        pandas DataFrame — a 45 MiB import per process). Same DictCursor
+        semantics, plain dicts out.
+        """
         cursor = self._conn.cursor(pymysql.cursors.DictCursor)
         try:
             cursor.execute(sql)
             rows = cursor.fetchall()
-            return pd.DataFrame(rows)
+            columns = [d[0] for d in cursor.description] if cursor.description else []
+            return columns, list(rows)
         finally:
             cursor.close()
 
@@ -68,9 +74,9 @@ class LockedMySQLConnectionWrapper:
         _filter_sql(sql)
         return self._wrapped.db_execute(sql, params)
 
-    def query_dataframe(self, sql: str) -> pd.DataFrame:
+    def query_rows(self, sql: str):
         _filter_sql(sql)
-        return self._wrapped.query_dataframe(sql)
+        return self._wrapped.query_rows(sql)
 
 
 class LockedClickHouseClient:
@@ -87,15 +93,6 @@ class LockedClickHouseClient:
             with_column_types=with_column_types,
             settings=settings, **kwargs
         )
-
-    def query_dataframe(self, query, params=None, settings=None, **kwargs):
-        _filter_sql(query)
-        result = self._wrapped.execute(query, params=params, settings=settings, with_column_types=True, **kwargs)
-        if result:
-            data, columns = result
-            if data:
-                return pd.DataFrame(data, columns=[c[0] for c in columns])
-        return pd.DataFrame()
 
     def disconnect(self):
         return self._wrapped.disconnect()

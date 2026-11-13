@@ -135,31 +135,33 @@ def _is_query_allowed(sql: str) -> bool:
     return any(sql_trimmed.startswith(p) for p in allowed)
 
 
+def _fetch_rows(client, sql: str):
+    """Dialect-agnostic read path: -> (column_names, rows_as_dicts). No pandas.
+
+    MySQL wrapper (raw or Locked) exposes `query_rows`; ClickHouse goes through
+    `execute(with_column_types=True)` (the Locked client filters it first).
+    Replaces the old `hasattr(client, 'query_dataframe')` DataFrame dispatch:
+    same output shape, none of the 45 MiB pandas import.
+    """
+    if hasattr(client, 'query_rows'):
+        return client.query_rows(sql)
+    result = client.execute(sql, with_column_types=True)
+    if not result or not result[0]:
+        return [], []
+    data, columns = result
+    col_names = [c[0] for c in columns]
+    return col_names, [dict(zip(col_names, row)) for row in data]
+
+
 def _result_to_json(client, sql: str) -> str:
     """Execute SQL and return JSON string with columns + rows. Decimals cast to float."""
-    if hasattr(client, 'query_dataframe'):
-        df = client.query_dataframe(sql)
-        if df.empty:
-            return json.dumps({"columns": [], "rows": [], "row_count": 0})
-        rows = [_sanitize_row(r) for r in df.to_dict(orient='records')]
-        return json.dumps({
-            "columns": list(df.columns),
-            "rows": rows,
-            "row_count": len(rows),
-        }, default=str)
-    else:
-        # ClickHouse
-        result = client.execute(sql, with_column_types=True)
-        if not result or not result[0]:
-            return json.dumps({"columns": [], "rows": [], "row_count": 0})
-        data, columns = result
-        col_names = [c[0] for c in columns]
-        rows = [_sanitize_row(dict(zip(col_names, row))) for row in data]
-        return json.dumps({
-            "columns": col_names,
-            "rows": rows,
-            "row_count": len(rows),
-        }, default=str)
+    columns, rows = _fetch_rows(client, sql)
+    rows = [_sanitize_row(r) for r in rows]
+    return json.dumps({
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+    }, default=str)
 
 
 # --- Schema ---
@@ -287,12 +289,10 @@ def table_schema_query(tbl_name: str, connection: str = 'ck', force_refresh: boo
         db = DBManager()
         client = getattr(db, connection)
 
-        if hasattr(client, 'query_dataframe'):
-            result = client.query_dataframe(f"SHOW CREATE TABLE {tbl_name}")
-            schema = result.to_string() if not result.empty else ""
-        else:
-            result = client.execute(f"SHOW CREATE TABLE {tbl_name}")
-            schema = str(result[0][0]) if result else ""
+        # MySQL: (Table, Create Table) — the DDL is the LAST column;
+        # ClickHouse: a single `statement` column. columns[-1] serves both.
+        columns, rows = _fetch_rows(client, f"SHOW CREATE TABLE {tbl_name}")
+        schema = str(rows[0][columns[-1]]) if rows and columns else ""
 
         schema = schema.strip().replace('statement\n', '').strip()
         if schema and schema[0].isdigit():
@@ -323,12 +323,13 @@ def table_schema_query(tbl_name: str, connection: str = 'ck', force_refresh: boo
 def _resolve_connection_type(connection: str) -> str:
     """Resolve a connection name to its DBMS type ('clickhouse' | 'mysql').
 
-    Replaces the brittle ``hasattr(client, 'query_dataframe')`` dispatch: BOTH
-    Locked wrappers define ``query_dataframe`` (MySQL natively, ClickHouse via
-    the adapter in connections/wrappers.py), so that attribute check *always*
-    picked the MySQL branch — even for ClickHouse, which then fabricated a
-    fake PRIMARY index from ClickHouse's stub ``SHOW INDEX``. This reads the
-    section's declared ``type`` (with the section-name prefix fallback), the
+    Replaces the brittle ``hasattr(client, 'query_dataframe')`` dialect
+    dispatch of the old pandas era: BOTH Locked wrappers defined it (MySQL
+    natively, ClickHouse via an adapter), so the check *always* picked the
+    MySQL branch -- even for ClickHouse, which then fabricated a fake PRIMARY
+    index from ClickHouse's stub ``SHOW INDEX``. The pandas-free `query_rows`
+    interface is MySQL-only again, but dialect is still read from the
+    section's declared `type` (with the section-name prefix fallback), the
     same source of truth ``find_table_query`` uses. Connection names use
     underscores; db.ini sections use dashes, so normalize the way
     DBManager.__getattr__ does.
@@ -411,14 +412,14 @@ def table_info_query(tbl_name: str, connection: str = 'ck', force_refresh: bool 
         if ctype == 'mysql':
             # MySQL: SHOW INDEX returns real BTREE indexes with real cardinality.
             try:
-                result = client.query_dataframe(f"SELECT COUNT(*) as cnt FROM {tbl_name}")
-                info['row_count'] = int(result['cnt'].iloc[0]) if not result.empty else 0
+                _cols, rows = _fetch_rows(client, f"SELECT COUNT(*) as cnt FROM {tbl_name}")
+                info['row_count'] = int(rows[0]['cnt']) if rows else 0
             except Exception:
                 info['row_count'] = None
             try:
-                idx_result = client.query_dataframe(f"SHOW INDEX FROM {tbl_name}")
-                if not idx_result.empty:
-                    info['indexes'] = idx_result.to_dict('records')
+                _cols, rows = _fetch_rows(client, f"SHOW INDEX FROM {tbl_name}")
+                if rows:
+                    info['indexes'] = rows
             except Exception:
                 info['indexes'] = []
         else:
@@ -501,10 +502,7 @@ def check_connection_query(connection: str = 'ck') -> str:
     start = time.time()
     db = DBManager()
     client = getattr(db, connection)  # raises AttributeError if unknown; starts tunnel if Auto
-    if hasattr(client, 'query_dataframe'):
-        client.query_dataframe('SELECT 1')
-    else:
-        client.execute('SELECT 1')
+    _fetch_rows(client, 'SELECT 1')
     return json.dumps({
         "connection": connection,
         "status": "ok",
@@ -518,18 +516,18 @@ def list_tables(connection: str = 'ck', database: str | None = None, like: str |
         db = DBManager()
         client = getattr(db, connection)
 
-        if hasattr(client, 'query_dataframe'):
+        if hasattr(client, 'query_rows'):
             # MySQL
             sql = "SHOW TABLES"
             if database:
                 sql = f"SHOW TABLES FROM `{database}`"
             if like:
                 sql += f" LIKE '{like}'"
-            result = client.query_dataframe(sql)
-            if result.empty:
+            columns, rows = _fetch_rows(client, sql)
+            if not rows:
                 return json.dumps({"tables": [], "count": 0})
-            col = result.columns[0]
-            tables = result[col].tolist()
+            first = columns[0] if columns else ''
+            tables = [str(r.get(first)) for r in rows]
         else:
             # ClickHouse
             if database:
@@ -614,17 +612,16 @@ def _full_catalog_query(ctype: str) -> str:
 
 def _exec_catalog(client, sql: str) -> list:
     """Run a catalog SELECT; return list of (database, table, engine) tuples."""
-    if hasattr(client, 'query_dataframe'):
-        df = client.query_dataframe(sql)
-        if df is None or getattr(df, 'empty', True):
-            return []
-        out = []
-        for row in df.itertuples(index=False, name=None):
-            db_name = str(row[0]) if len(row) > 0 and row[0] is not None else ''
-            tbl = str(row[1]) if len(row) > 1 and row[1] is not None else ''
-            eng = str(row[2]) if len(row) > 2 and row[2] is not None else ''
-            out.append((db_name, tbl, eng))
-        return out
+    if hasattr(client, 'query_rows'):
+        _cols, rows = _fetch_rows(client, sql)
+        return [
+            (
+                str(r.get('db_name')) if r.get('db_name') is not None else '',
+                str(r.get('tbl_name')) if r.get('tbl_name') is not None else '',
+                str(r.get('engine')) if r.get('engine') is not None else '',
+            )
+            for r in rows
+        ]
     result = client.execute(sql, with_column_types=True)
     if not result or not result[0]:
         return []
@@ -757,12 +754,9 @@ def explain_query(sql: str, connection: str = 'ck') -> str:
         db = DBManager()
         client = getattr(db, connection)
 
-        if hasattr(client, 'query_dataframe'):
-            result = client.query_dataframe(explain_sql)
-            if result.empty:
-                return json.dumps({"plan": [], "raw": ""})
-            col = result.columns[0]
-            plan_lines = result[col].tolist()
+        if hasattr(client, 'query_rows'):
+            columns, rows = _fetch_rows(client, explain_sql)
+            plan_lines = [row[columns[0]] for row in rows] if rows and columns else []
         else:
             result = client.execute(explain_sql)
             plan_lines = [row[0] for row in result] if result else []
