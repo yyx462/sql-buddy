@@ -237,7 +237,9 @@ def test_build_cmd_resolves_env_and_defaults(tmp_path, monkeypatch):
     m._load()
     cmd = m._build_cmd("b", [(1000, "rh", 9000)])
     assert cmd[-1] == "u1@h.example"
-    assert cmd[cmd.index("-i") + 1] == "/keys/k"
+    # _build_cmd normpaths the key (Windows mixed-slash safety) — expect the
+    # platform-native form, not the raw posix literal.
+    assert cmd[cmd.index("-i") + 1] == os.path.normpath("/keys/k")
     assert cmd[cmd.index("-p") + 1] == "22"  # DEFAULT_SSH_PORT
 
 
